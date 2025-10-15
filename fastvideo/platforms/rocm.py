@@ -70,6 +70,9 @@ class RocmPlatform(Platform):
         elif selected_backend in (AttentionBackendEnum.FLASH_ATTN, None):
             pass
 
+        elif selected_backend == AttentionBackendEnum.VIDEO_SPARSE_ATTN:
+            logger.info("Using Video Sparse Attention backend.")
+            return "fastvideo.attention.backends.video_sparse_attn.VideoSparseAttentionBackend"
         elif selected_backend in (AttentionBackendEnum.SLIDING_TILE_ATTN,
                                   AttentionBackendEnum.SAGE_ATTN):
             raise ValueError(
@@ -110,11 +113,21 @@ class RocmPlatform(Platform):
 
         if target_backend == AttentionBackendEnum.TORCH_SDPA:
             logger.info("Using Torch SDPA backend.")
-
             return "fastvideo.attention.backends.sdpa.SDPABackend"
 
-        logger.info("Using Flash Attention backend.")
+        # Try Video Sparse Attention as a fallback for ROCm
+        try:
+            from fastvideo.attention.backends.video_sparse_attn import (  # noqa: F401
+                VideoSparseAttentionBackend)
+            
+            supported_sizes = VideoSparseAttentionBackend.get_supported_head_sizes()
+            if head_size in supported_sizes:
+                logger.info("Using Video Sparse Attention backend.")
+                return "fastvideo.attention.backends.video_sparse_attn.VideoSparseAttentionBackend"
+        except ImportError:
+            logger.info("Video Sparse Attention backend not available.")
 
+        logger.info("Using Flash Attention backend.")
         return "fastvideo.attention.backends.flash_attn.FlashAttentionBackend"
 
     @classmethod

@@ -12,4 +12,5 @@ sources = {
 kernels = ['block_sparse']
 
 ### WHICH GPU TARGET DO WE WANT TO BUILD FOR?
-target = 'h100'
+import os
+target = os.getenv('VSA_TARGET', 'h100')  # Default to h100, can be overridden for ROCm

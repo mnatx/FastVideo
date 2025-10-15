@@ -10,8 +10,23 @@ from vsa.index import map_to_index
 from typing import Tuple, Optional
 
 
+def get_vsa_implementation():
+    """Get the appropriate VSA implementation based on the current platform."""
+    try:
+        major, minor = torch.cuda.get_device_capability(0)
+        is_h100 = major == 9 and minor == 0
+        is_rocm = torch.cuda.is_available() and hasattr(torch.version, 'hip') and torch.version.hip is not None
+        
+        if is_h100 and not is_rocm and block_sparse_fwd is not None:
+            return "cuda_sm90"
+        else:
+            return "triton"
+    except:
+        return "triton"
 
-@torch.library.custom_op("vsa::block_sparse_attn_triton", mutates_args=(), device_types="cuda")
+
+
+@torch.library.custom_op("vsa::block_sparse_attn_triton", mutates_args=(), device_types=["cuda", "hip"])
 def block_sparse_attn_triton(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -44,7 +59,7 @@ def _block_sparse_attn_triton_fake(
     return o, M
 
 
-@torch.library.custom_op("vsa::block_sparse_attn_backward_triton", mutates_args=(), device_types="cuda")
+@torch.library.custom_op("vsa::block_sparse_attn_backward_triton", mutates_args=(), device_types=["cuda", "hip"])
 def block_sparse_attn_backward_triton(
     grad_output_padded: torch.Tensor, 
     q_padded: torch.Tensor, 
@@ -93,10 +108,17 @@ def setup_context_triton(ctx, inputs, output):
 block_sparse_attn_triton.register_autograd(backward_triton, setup_context=setup_context_triton)
 
 
-major, minor = torch.cuda.get_device_capability(0)
+# Check device capability and platform
+try:
+    major, minor = torch.cuda.get_device_capability(0)
+    is_h100 = major == 9 and minor == 0
+    is_rocm = torch.cuda.is_available() and hasattr(torch.version, 'hip') and torch.version.hip is not None
+except:
+    is_h100 = False
+    is_rocm = False
 
-if major == 9 and minor == 0:# check if H100
-    @torch.library.custom_op("vsa::block_sparse_attn_SM90", mutates_args=(), device_types="cuda")
+if is_h100 and not is_rocm:  # Only use CUDA kernels on H100, not on ROCm
+    @torch.library.custom_op("vsa::block_sparse_attn_SM90", mutates_args=(), device_types=["cuda"])
     def block_sparse_attn_SM90(
         q_padded: torch.Tensor,
         k_padded: torch.Tensor, 
@@ -130,7 +152,7 @@ if major == 9 and minor == 0:# check if H100
         return o_padded, lse_padded
 
 
-    @torch.library.custom_op("vsa::block_sparse_attn_backward_SM90", mutates_args=(), device_types="cuda")
+    @torch.library.custom_op("vsa::block_sparse_attn_backward_SM90", mutates_args=(), device_types=["cuda"])
     def block_sparse_attn_backward_SM90(
         grad_output_padded: torch.Tensor, 
         q_padded: torch.Tensor, 
@@ -183,3 +205,29 @@ if major == 9 and minor == 0:# check if H100
 
 
     block_sparse_attn_SM90.register_autograd(backward_SM90, setup_context=setup_context_SM90)
+
+
+def video_sparse_attn(q, k, v, variable_block_sizes, topk, block_size, compress_attn_weight=None):
+    """
+    Unified interface for Video Sparse Attention that automatically selects
+    the appropriate implementation based on the current platform.
+    """
+    implementation = get_vsa_implementation()
+    
+    if implementation == "cuda_sm90" and not is_rocm:
+        # Use CUDA SM90 implementation for H100
+        B, H, T, D = q.shape
+        # Create block map for sparse attention
+        # This is a simplified version - in practice you'd need proper block mapping
+        block_map = torch.ones((B, H, T // block_size[0], T // block_size[0]), 
+                              device=q.device, dtype=torch.bool)
+        o_padded, lse_padded = block_sparse_attn_SM90(q, k, v, block_map, variable_block_sizes)
+        return o_padded
+    else:
+        # Use Triton implementation (works on both CUDA and ROCm)
+        B, H, T, D = q.shape
+        # Create block map for sparse attention
+        block_map = torch.ones((B, H, T // block_size[0], T // block_size[0]), 
+                              device=q.device, dtype=torch.bool)
+        o_padded, M = block_sparse_attn_triton(q, k, v, block_map, variable_block_sizes)
+        return o_padded

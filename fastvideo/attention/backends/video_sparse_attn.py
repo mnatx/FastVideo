@@ -8,7 +8,10 @@ import torch
 try:
     from vsa import video_sparse_attn
 except ImportError:
-    video_sparse_attn = None
+    try:
+        from vsa.block_sparse_wrapper import video_sparse_attn
+    except ImportError:
+        video_sparse_attn = None
 
 from typing import Any
 
@@ -118,6 +121,23 @@ class VideoSparseAttentionBackend(AttentionBackend):
     @staticmethod
     def get_supported_head_sizes() -> list[int]:
         return [64, 128]
+    
+    @staticmethod
+    def is_available() -> bool:
+        """Check if VSA is available on the current platform."""
+        if video_sparse_attn is None:
+            return False
+        
+        # Check if we're on a supported platform (CUDA or ROCm)
+        if not torch.cuda.is_available():
+            return False
+            
+        # For ROCm, we need to check if Triton is available
+        try:
+            import triton
+            return True
+        except ImportError:
+            return False
 
     @staticmethod
     def get_name() -> str:
@@ -166,6 +186,9 @@ class VideoSparseAttentionMetadataBuilder(AttentionMetadataBuilder):
         device: torch.device,
         **kwargs: dict[str, Any],
     ) -> VideoSparseAttentionMetadata:
+        # Ensure we're on a supported device
+        if not device.type in ['cuda', 'hip']:
+            raise ValueError(f"VSA requires CUDA or ROCm device, got {device.type}")
         patch_size = patch_size
         dit_seq_shape = (raw_latent_shape[0] // patch_size[0],
                          raw_latent_shape[1] // patch_size[1],
@@ -272,6 +295,8 @@ class VideoSparseAttentionImpl(AttentionImpl):
 
         if video_sparse_attn is None:
             raise NotImplementedError("video_sparse_attn is not installed")
+        
+        # Use the unified interface that automatically selects the appropriate implementation
         hidden_states = video_sparse_attn(
             query,
             key,
