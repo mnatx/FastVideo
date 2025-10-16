@@ -2,7 +2,8 @@
 sources = {
     'block_sparse': {
         'source_files': {
-            'h100': 'vsa/block_sparse_h100.cu'
+            'h100': 'vsa/block_sparse_h100.cu',
+            'rocm': 'vsa/block_sparse_attn_triton.py'  # ROCm uses Triton implementation
         }
     }
 }
