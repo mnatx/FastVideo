@@ -35,96 +35,45 @@ def create_input_tensors(batch, head, seq_len, headdim):
     v = torch.randn(batch, head, seq_len, headdim, dtype=torch.bfloat16, device="cuda")
     return q, k, v
 
-def generate_block_sparse_pattern(bs, h, num_q_blocks, num_kv_blocks, k, device="cuda"):
+def create_block_map_and_sizes(batch, head, seq_len, topk, device="cuda"):
     """
-    Generate a block sparse pattern where each q block attends to exactly k kv blocks.
+    Create block map and variable block sizes for VSA.
     
     Args:
-        bs: batch size
-        h: number of heads
-        num_q_blocks: number of query blocks
-        num_kv_blocks: number of key-value blocks
-        k: number of kv blocks each q block attends to
+        batch: batch size
+        head: number of heads
+        seq_len: sequence length
+        topk: number of kv blocks each q block attends to
         device: device to create tensors on
         
     Returns:
-        q2k_block_sparse_index: [bs, h, num_q_blocks, k]
-            Contains the indices of kv blocks that each q block attends to.
-        q2k_block_sparse_num: [bs, h, num_q_blocks]
-            Contains the number of kv blocks that each q block attends to (all equal to k).
-        k2q_block_sparse_index: [bs, h, num_kv_blocks, num_q_blocks]
-            Contains the indices of q blocks that attend to each kv block.
-        k2q_block_sparse_num: [bs, h, num_kv_blocks]
-            Contains the number of q blocks that attend to each kv block.
-        block_sparse_mask: [bs, h, num_q_blocks, num_kv_blocks]
-            Binary mask where 1 indicates attention connection.
+        block_map: [batch, head, num_q_blocks, num_kv_blocks] binary mask
+        variable_block_sizes: [num_kv_blocks] block sizes
     """
-    # Ensure k is not larger than num_kv_blocks
-    k = min(k, num_kv_blocks)
+    num_q_blocks = seq_len // BLOCK_M
+    num_kv_blocks = seq_len // BLOCK_N
     
-    # Create random scores for sampling
-    scores = torch.rand(bs, h, num_q_blocks, num_kv_blocks, device=device)
+    # Create random block map
+    block_map = torch.zeros(batch, head, num_q_blocks, num_kv_blocks, dtype=torch.bool, device=device)
     
-    # Get top-k indices for each q block
-    _, q2k_block_sparse_index = torch.topk(scores, k, dim=-1)
-    q2k_block_sparse_index = q2k_block_sparse_index.to(torch.int32)
-    
-    # sort q2k_block_sparse_index
-    q2k_block_sparse_index, _ = torch.sort(q2k_block_sparse_index, dim=-1)
-
-    # All q blocks attend to exactly k kv blocks
-    q2k_block_sparse_num = torch.full((bs, h, num_q_blocks), k, dtype=torch.int32, device=device)
-    
-    # Create the corresponding mask
-    block_sparse_mask = torch.zeros(bs, h, num_q_blocks, num_kv_blocks, dtype=torch.bool, device=device)
-    
-    # Fill in the mask based on the indices
-    for b in range(bs):
-        for head in range(h):
+    # For each batch and head, create sparse pattern
+    for b in range(batch):
+        for h in range(head):
+            # Create random scores for each q block
+            scores = torch.rand(num_q_blocks, num_kv_blocks, device=device)
+            # Get top-k indices for each q block
+            _, topk_indices = torch.topk(scores, min(topk, num_kv_blocks), dim=-1)
+            # Set the mask
             for q_idx in range(num_q_blocks):
-                kv_indices = q2k_block_sparse_index[b, head, q_idx]
-                block_sparse_mask[b, head, q_idx, kv_indices] = True
+                kv_indices = topk_indices[q_idx]
+                block_map[b, h, q_idx, kv_indices] = True
     
-    # Create the reverse mapping (k2q)
-    # First, initialize lists to collect q indices for each kv block
-    k2q_indices_list = [[[] for _ in range(num_kv_blocks)] for _ in range(bs * h)]
+    # Create variable block sizes (all blocks are full size for now)
+    variable_block_sizes = torch.full((num_kv_blocks,), BLOCK_N, dtype=torch.int32, device=device)
     
-    # Populate the lists based on q2k mapping
-    for b in range(bs):
-        for head in range(h):
-            flat_idx = b * h + head
-            for q_idx in range(num_q_blocks):
-                kv_indices = q2k_block_sparse_index[b, head, q_idx].tolist()
-                for kv_idx in kv_indices:
-                    k2q_indices_list[flat_idx][kv_idx].append(q_idx)
-    
-    # Find the maximum number of q blocks that attend to any kv block
-    max_q_per_kv = 0
-    for flat_idx in range(bs * h):
-        for kv_idx in range(num_kv_blocks):
-            max_q_per_kv = max(max_q_per_kv, len(k2q_indices_list[flat_idx][kv_idx]))
-    
-    # Create tensors for k2q mapping
-    k2q_block_sparse_index = torch.full((bs, h, num_kv_blocks, max_q_per_kv), -1, 
-                                        dtype=torch.int32, device=device)
-    k2q_block_sparse_num = torch.zeros((bs, h, num_kv_blocks), 
-                                       dtype=torch.int32, device=device)
-    
-    # Fill the tensors
-    for b in range(bs):
-        for head in range(h):
-            flat_idx = b * h + head
-            for kv_idx in range(num_kv_blocks):
-                q_indices = k2q_indices_list[flat_idx][kv_idx]
-                num_q = len(q_indices)
-                k2q_block_sparse_num[b, head, kv_idx] = num_q
-                if num_q > 0:
-                    k2q_block_sparse_index[b, head, kv_idx, :num_q] = torch.tensor(
-                        q_indices, dtype=torch.int32, device=device)
-                
-    return q2k_block_sparse_index, q2k_block_sparse_num, k2q_block_sparse_index, k2q_block_sparse_num, block_sparse_mask
+    return block_map, variable_block_sizes
 
-def benchmark_block_sparse_attention(q, k, v, q2k_block_sparse_index, q2k_block_sparse_num, k2q_block_sparse_index, k2q_block_sparse_num, flops):
+def benchmark_block_sparse_attention(q, k, v, block_map, variable_block_sizes, flops):
     """Benchmark block sparse attention forward+backward pass."""
     print("\n=== BLOCK SPARSE ATTENTION FORWARD+BACKWARD BENCHMARK ===")
     
@@ -133,7 +82,7 @@ def benchmark_block_sparse_attention(q, k, v, q2k_block_sparse_index, q2k_block_
     q_fwd = q.clone().requires_grad_(True)
     k_fwd = k.clone().requires_grad_(True)
     v_fwd = v.clone().requires_grad_(True)
-    o = block_sparse_attn(q_fwd, k_fwd, v_fwd, q2k_block_sparse_index, q2k_block_sparse_num, k2q_block_sparse_index, k2q_block_sparse_num)
+    o, M = block_sparse_attn(q_fwd, k_fwd, v_fwd, block_map, variable_block_sizes)
     grad_output = torch.randn_like(o)
     o.backward(grad_output)
     torch.cuda.synchronize()
@@ -143,7 +92,7 @@ def benchmark_block_sparse_attention(q, k, v, q2k_block_sparse_index, q2k_block_
         q_fwd = q.clone().requires_grad_(True)
         k_fwd = k.clone().requires_grad_(True)
         v_fwd = v.clone().requires_grad_(True)
-        o = block_sparse_attn(q_fwd, k_fwd, v_fwd, q2k_block_sparse_index, q2k_block_sparse_num, k2q_block_sparse_index, k2q_block_sparse_num)
+        o, M = block_sparse_attn(q_fwd, k_fwd, v_fwd, block_map, variable_block_sizes)
         grad_output = torch.randn_like(o)
         o.backward(grad_output)
     
@@ -200,13 +149,13 @@ def main():
         topk = max(1, topk)       
         print(f"Using topk={topk} kv blocks per q block (out of {num_kv_blocks} total kv blocks)")
         
-        # Generate block sparse pattern
-        q2k_block_sparse_index, q2k_block_sparse_num, k2q_block_sparse_index, k2q_block_sparse_num, _ = generate_block_sparse_pattern(
-            batch, head, num_q_blocks, num_kv_blocks, topk, device="cuda")
+        # Generate block map and variable block sizes
+        block_map, variable_block_sizes = create_block_map_and_sizes(
+            batch, head, seq_len, topk, device="cuda")
         
         # Benchmark block sparse attention
         sparse_fwd = benchmark_block_sparse_attention(
-            q, k, v, q2k_block_sparse_index, q2k_block_sparse_num, k2q_block_sparse_index, k2q_block_sparse_num, flops
+            q, k, v, block_map, variable_block_sizes, flops
         )
         
         # Print results
