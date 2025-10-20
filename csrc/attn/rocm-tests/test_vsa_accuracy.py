@@ -4,6 +4,13 @@ Final Comprehensive VSA Accuracy Test for ROCm Platform
 
 This test provides a complete accuracy evaluation of the Video Sparse Attention backend
 on ROCm, sweeping through various configurations and comparing against PyTorch reference.
+
+GPU-Specific Optimizations:
+- AMD Radeon PRO W7800: Conservative configurations optimized for 30GB memory
+- AMD Instinct MI250: Aggressive configurations optimized for 128GB memory
+- Generic ROCm: Balanced configurations for other ROCm-compatible GPUs
+
+The test automatically detects the GPU type and selects appropriate parameter ranges.
 """
 
 import torch
@@ -84,7 +91,8 @@ class ComprehensiveVSATester:
             device_count = torch.cuda.device_count()
             if self.is_rocm:
                 hip_version = torch.version.hip
-                return f"ROCm (HIP {hip_version}) - {device_name} ({device_count} devices)"
+                gpu_type = self._detect_gpu_type()
+                return f"ROCm (HIP {hip_version}) - {device_name} ({device_count} devices) [Type: {gpu_type.upper()}]"
             else:
                 return f"CUDA - {device_name} ({device_count} devices)"
         else:
@@ -295,17 +303,66 @@ class ComprehensiveVSATester:
             print(f"Error in test case {config}: {e}")
             return None
     
+    def _detect_gpu_type(self) -> str:
+        """Detect the type of GPU being used."""
+        if not torch.cuda.is_available():
+            return "unknown"
+        
+        device_name = torch.cuda.get_device_name().lower()
+        if "mi250" in device_name or "instinct" in device_name:
+            return "mi250"
+        elif "w7800" in device_name or "radeon pro" in device_name:
+            return "w7800"
+        else:
+            return "generic_rocm"
+    
+    def _validate_config_for_gpu(self, config: TestConfig) -> bool:
+        """Validate if a configuration is appropriate for the detected GPU."""
+        if not self.is_rocm:
+            return True
+        
+        gpu_type = self._detect_gpu_type()
+        total_elements = config.batch_size * config.num_heads * config.seq_len * config.head_dim
+        
+        if gpu_type == "mi250":
+            # MI250 can handle very large configurations
+            return total_elements <= 10000000  # 10M elements
+        elif gpu_type == "w7800":
+            # W7800 has more conservative limits
+            return total_elements <= 1000000   # 1M elements
+        else:
+            # Generic ROCm - balanced approach
+            return total_elements <= 2000000   # 2M elements
+    
     def generate_comprehensive_test_configs(self) -> List[TestConfig]:
         """Generate comprehensive test configurations."""
         configs = []
         
         if self.is_rocm:
-            # ROCm configurations - sequence lengths must be multiples of 64
-            batch_sizes = [1, 2]
-            num_heads_list = [2, 4, 8]
-            seq_lens = [64, 128, 256, 384, 512]  # Must be multiples of 64
-            head_dims = [64, 128]  # VSA supports both
-            top_k_list = [1, 2, 4, 8, 16]
+            gpu_type = self._detect_gpu_type()
+            
+            if gpu_type == "mi250":
+                # MI250 configurations - optimized for larger memory capacity
+                # MI250 has 128GB memory vs W7800's 30GB, allowing for more aggressive configs
+                batch_sizes = [1, 2, 4, 8]  # Increased batch sizes
+                num_heads_list = [4, 8, 16, 24, 32]  # More heads
+                seq_lens = [64, 128, 256, 512, 1024, 2048, 4096]  # Longer sequences
+                head_dims = [64, 128, 256]  # More head dimensions
+                top_k_list = [1, 2, 4, 8, 16, 32, 64]  # More top-k values
+            elif gpu_type == "w7800":
+                # W7800 configurations - conservative for shared memory
+                batch_sizes = [1, 2]
+                num_heads_list = [2, 4, 8]
+                seq_lens = [64, 128, 256, 384, 512]  # Must be multiples of 64
+                head_dims = [64, 128]  # VSA supports both
+                top_k_list = [1, 2, 4, 8, 16]
+            else:
+                # Generic ROCm configurations - balanced approach
+                batch_sizes = [1, 2, 4]
+                num_heads_list = [4, 8, 16]
+                seq_lens = [64, 128, 256, 512, 1024]
+                head_dims = [64, 128]
+                top_k_list = [2, 4, 8, 16, 32]
         else:
             # CUDA configurations
             batch_sizes = [1, 2, 4]
@@ -325,16 +382,18 @@ class ComprehensiveVSATester:
                                 continue
                             
                             # Skip configurations that might cause memory issues
-                            if self.is_rocm and batch_size * num_heads * seq_len * head_dim > 1000000:
-                                continue
-                            
-                            configs.append(TestConfig(
+                            test_config = TestConfig(
                                 batch_size=batch_size,
                                 num_heads=num_heads,
                                 seq_len=seq_len,
                                 head_dim=head_dim,
                                 top_k=top_k
-                            ))
+                            )
+                            
+                            if not self._validate_config_for_gpu(test_config):
+                                continue
+                            
+                            configs.append(test_config)
         
         return configs
     
@@ -346,6 +405,15 @@ class ComprehensiveVSATester:
         print(f"Platform: {self._get_platform_info()}")
         print(f"PyTorch version: {torch.__version__}")
         print(f"ROCm optimized: {self.is_rocm}")
+        if self.is_rocm:
+            gpu_type = self._detect_gpu_type()
+            print(f"GPU Type detected: {gpu_type.upper()}")
+            if gpu_type == "mi250":
+                print("Using MI250-optimized configurations (larger batch sizes, longer sequences)")
+            elif gpu_type == "w7800":
+                print("Using W7800-optimized configurations (conservative memory usage)")
+            else:
+                print("Using generic ROCm configurations (balanced approach)")
         print()
         
         if not VSA_AVAILABLE:
@@ -358,6 +426,21 @@ class ComprehensiveVSATester:
             configs = configs[:max_configs]
         
         print(f"Running {len(configs)} test configurations...")
+        
+        # Show configuration ranges
+        if configs:
+            batch_sizes = sorted(set(c.batch_size for c in configs))
+            num_heads = sorted(set(c.num_heads for c in configs))
+            seq_lens = sorted(set(c.seq_len for c in configs))
+            head_dims = sorted(set(c.head_dim for c in configs))
+            top_k_vals = sorted(set(c.top_k for c in configs))
+            
+            print(f"Configuration ranges:")
+            print(f"  Batch sizes: {batch_sizes}")
+            print(f"  Number of heads: {num_heads}")
+            print(f"  Sequence lengths: {seq_lens}")
+            print(f"  Head dimensions: {head_dims}")
+            print(f"  Top-k values: {top_k_vals}")
         print()
         
         # Run tests
@@ -602,6 +685,18 @@ def main():
         print("=" * 100)
         success_rate = results['summary']['success_rate']
         output_mae = results['summary']['output_mae']['mean']
+        
+        # Show GPU-specific information
+        if self.is_rocm:
+            gpu_type = self._detect_gpu_type()
+            print(f"GPU Type: {gpu_type.upper()}")
+            if gpu_type == "mi250":
+                print("✅ MI250-optimized configurations used (128GB memory, aggressive parameters)")
+            elif gpu_type == "w7800":
+                print("✅ W7800-optimized configurations used (30GB memory, conservative parameters)")
+            else:
+                print("✅ Generic ROCm configurations used (balanced parameters)")
+            print()
         
         if success_rate >= 0.9 and output_mae < 1e-3:
             print("✅ EXCELLENT: VSA implementation shows high accuracy and reliability")
