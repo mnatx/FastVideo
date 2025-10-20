@@ -27,6 +27,13 @@ def is_rocm_platform():
     """Check if we're running on ROCm platform."""
     return torch.cuda.is_available() and hasattr(torch.version, 'hip') and torch.version.hip is not None
 
+def is_mi250_gpu():
+    """Check if we're running on AMD Instinct MI250 GPU."""
+    if not is_rocm_platform():
+        return False
+    device_name = torch.cuda.get_device_name().lower()
+    return 'mi250' in device_name or 'instinct' in device_name
+
 def get_platform_info():
     """Get platform information for debugging."""
     if torch.cuda.is_available():
@@ -34,7 +41,8 @@ def get_platform_info():
         device_count = torch.cuda.device_count()
         if is_rocm_platform():
             hip_version = torch.version.hip
-            return f"ROCm (HIP {hip_version}) - {device_name} ({device_count} devices)"
+            gpu_type = "MI250" if is_mi250_gpu() else "Other ROCm GPU"
+            return f"ROCm (HIP {hip_version}) - {device_name} ({device_count} devices) [{gpu_type}]"
         else:
             return f"CUDA - {device_name} ({device_count} devices)"
     else:
@@ -156,15 +164,25 @@ def check_correctness(h, d, num_blocks, k, num_iterations=20, error_mode='all'):
 def generate_error_graphs(h, d, error_mode='all'):
     # Check if we're on ROCm and adjust parameters accordingly
     is_rocm = is_rocm_platform()
+    is_mi250 = is_mi250_gpu()
     
     if is_rocm:
-        # Use smaller parameters for ROCm to avoid shared memory issues
-        test_configs = [
-            {"num_blocks": 4, "k": 2, "description": "Very small sequence (ROCm)"},
-            {"num_blocks": 8, "k": 2, "description": "Small sequence (ROCm)"},
-            {"num_blocks": 12, "k": 3, "description": "Medium sequence (ROCm)"},
-        ]
-        print(f"\nError Analysis for h={h}, d={d}, mode={error_mode} (ROCm optimized)")
+        if is_mi250:
+            # Use MI250-optimized parameters (can handle larger dimensions)
+            test_configs = [
+                {"num_blocks": 16, "k": 2, "description": "Small sequence (MI250)"},
+                {"num_blocks": 32, "k": 4, "description": "Medium sequence (MI250)"},
+                {"num_blocks": 48, "k": 6, "description": "Large sequence (MI250)"},
+            ]
+            print(f"\nError Analysis for h={h}, d={d}, mode={error_mode} (MI250 optimized)")
+        else:
+            # Use smaller parameters for other ROCm GPUs to avoid shared memory issues
+            test_configs = [
+                {"num_blocks": 4, "k": 2, "description": "Very small sequence (ROCm)"},
+                {"num_blocks": 8, "k": 2, "description": "Small sequence (ROCm)"},
+                {"num_blocks": 12, "k": 3, "description": "Medium sequence (ROCm)"},
+            ]
+            print(f"\nError Analysis for h={h}, d={d}, mode={error_mode} (ROCm optimized)")
     else:
         # Use original parameters for CUDA
         test_configs = [
@@ -209,17 +227,25 @@ def generate_error_graphs(h, d, error_mode='all'):
 if __name__ == "__main__":
     # Check if we're on ROCm and adjust parameters accordingly
     is_rocm = is_rocm_platform()
+    is_mi250 = is_mi250_gpu()
     platform_info = get_platform_info()
     
     print(f"Platform: {platform_info}")
     print(f"PyTorch version: {torch.__version__}")
     
     if is_rocm:
-        # Use smaller parameters for ROCm to avoid shared memory issues
-        h, d = 4, 64
-        print("\nBlock Sparse Attention with Variable Block Sizes Analysis (ROCm Optimized)")
-        print("=" * 70)
-        print("Using smaller parameters to avoid shared memory limitations on ROCm")
+        if is_mi250:
+            # Use MI250-optimized parameters (can handle larger dimensions)
+            h, d = 16, 128
+            print("\nBlock Sparse Attention with Variable Block Sizes Analysis (MI250 Optimized)")
+            print("=" * 70)
+            print("Using MI250-optimized parameters - MI250 has 2x shared memory vs W7800")
+        else:
+            # Use smaller parameters for other ROCm GPUs to avoid shared memory issues
+            h, d = 4, 64
+            print("\nBlock Sparse Attention with Variable Block Sizes Analysis (ROCm Optimized)")
+            print("=" * 70)
+            print("Using smaller parameters to avoid shared memory limitations on ROCm")
     else:
         # Use original parameters for CUDA
         h, d = 16, 128
