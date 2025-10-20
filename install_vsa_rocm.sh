@@ -22,6 +22,6 @@ python setup.py install
 
 # Test installation
 echo "Testing VSA installation..."
-python ../../../test_vsa_rocm.py
+python ../rocm-tests/test_vsa_rocm.py
 
 echo "VSA ROCm installation completed successfully!"
