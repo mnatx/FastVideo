@@ -32,7 +32,14 @@ def is_mi250_gpu():
     if not is_rocm_platform():
         return False
     device_name = torch.cuda.get_device_name().lower()
-    return 'mi250' in device_name or 'instinct' in device_name
+    return 'mi250' in device_name
+
+def is_mi210_gpu():
+    """Check if we're running on AMD Instinct MI210 GPU."""
+    if not is_rocm_platform():
+        return False
+    device_name = torch.cuda.get_device_name().lower()
+    return 'mi210' in device_name
 
 def get_platform_info():
     """Get platform information for debugging."""
@@ -41,7 +48,12 @@ def get_platform_info():
         device_count = torch.cuda.device_count()
         if is_rocm_platform():
             hip_version = torch.version.hip
-            gpu_type = "MI250" if is_mi250_gpu() else "Other ROCm GPU"
+            if is_mi250_gpu():
+                gpu_type = "MI250"
+            elif is_mi210_gpu():
+                gpu_type = "MI210"
+            else:
+                gpu_type = "Other ROCm GPU"
             return f"ROCm (HIP {hip_version}) - {device_name} ({device_count} devices) [{gpu_type}]"
         else:
             return f"CUDA - {device_name} ({device_count} devices)"
@@ -165,6 +177,7 @@ def generate_error_graphs(h, d, error_mode='all'):
     # Check if we're on ROCm and adjust parameters accordingly
     is_rocm = is_rocm_platform()
     is_mi250 = is_mi250_gpu()
+    is_mi210 = is_mi210_gpu()
     
     if is_rocm:
         if is_mi250:
@@ -175,6 +188,14 @@ def generate_error_graphs(h, d, error_mode='all'):
                 {"num_blocks": 48, "k": 6, "description": "Large sequence (MI250)"},
             ]
             print(f"\nError Analysis for h={h}, d={d}, mode={error_mode} (MI250 optimized)")
+        elif is_mi210:
+            # Use MI210-optimized parameters (smaller shared memory than MI250)
+            test_configs = [
+                {"num_blocks": 4, "k": 2, "description": "Very small sequence (MI210)"},
+                {"num_blocks": 8, "k": 2, "description": "Small sequence (MI210)"},
+                {"num_blocks": 12, "k": 3, "description": "Medium sequence (MI210)"},
+            ]
+            print(f"\nError Analysis for h={h}, d={d}, mode={error_mode} (MI210 optimized)")
         else:
             # Use smaller parameters for other ROCm GPUs to avoid shared memory issues
             test_configs = [
@@ -228,6 +249,7 @@ if __name__ == "__main__":
     # Check if we're on ROCm and adjust parameters accordingly
     is_rocm = is_rocm_platform()
     is_mi250 = is_mi250_gpu()
+    is_mi210 = is_mi210_gpu()
     platform_info = get_platform_info()
     
     print(f"Platform: {platform_info}")
@@ -240,6 +262,12 @@ if __name__ == "__main__":
             print("\nBlock Sparse Attention with Variable Block Sizes Analysis (MI250 Optimized)")
             print("=" * 70)
             print("Using MI250-optimized parameters - MI250 has 2x shared memory vs W7800")
+        elif is_mi210:
+            # Use MI210-optimized parameters (smaller shared memory than MI250)
+            h, d = 4, 64
+            print("\nBlock Sparse Attention with Variable Block Sizes Analysis (MI210 Optimized)")
+            print("=" * 70)
+            print("Using MI210-optimized parameters - MI210 has limited shared memory")
         else:
             # Use smaller parameters for other ROCm GPUs to avoid shared memory issues
             h, d = 4, 64

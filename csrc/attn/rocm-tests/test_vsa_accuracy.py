@@ -309,8 +309,10 @@ class ComprehensiveVSATester:
             return "unknown"
         
         device_name = torch.cuda.get_device_name().lower()
-        if "mi250" in device_name or "instinct" in device_name:
+        if "mi250" in device_name:
             return "mi250"
+        elif "mi210" in device_name:
+            return "mi210"
         elif "w7800" in device_name or "radeon pro" in device_name:
             return "w7800"
         else:
@@ -327,6 +329,9 @@ class ComprehensiveVSATester:
         if gpu_type == "mi250":
             # MI250 can handle very large configurations
             return total_elements <= 10000000  # 10M elements
+        elif gpu_type == "mi210":
+            # MI210 has limited shared memory, more conservative than MI250
+            return total_elements <= 1000000   # 1M elements
         elif gpu_type == "w7800":
             # W7800 has more conservative limits
             return total_elements <= 1000000   # 1M elements
@@ -349,6 +354,14 @@ class ComprehensiveVSATester:
                 seq_lens = [64, 128, 256, 512, 1024, 2048, 4096]  # Longer sequences
                 head_dims = [64, 128, 256]  # More head dimensions
                 top_k_list = [1, 2, 4, 8, 16, 32, 64]  # More top-k values
+            elif gpu_type == "mi210":
+                # MI210 configurations - very conservative for shared memory limitations
+                # MI210 has limited shared memory compared to MI250, head_dim=128 causes issues
+                batch_sizes = [1, 2]
+                num_heads_list = [2, 4, 8]
+                seq_lens = [64, 128, 256, 384, 512]  # Must be multiples of 64
+                head_dims = [64]  # Only use 64 for MI210 to avoid shared memory issues
+                top_k_list = [1, 2, 4, 8, 16]
             elif gpu_type == "w7800":
                 # W7800 configurations - conservative for shared memory
                 batch_sizes = [1, 2]
@@ -410,6 +423,8 @@ class ComprehensiveVSATester:
             print(f"GPU Type detected: {gpu_type.upper()}")
             if gpu_type == "mi250":
                 print("Using MI250-optimized configurations (larger batch sizes, longer sequences)")
+            elif gpu_type == "mi210":
+                print("Using MI210-optimized configurations (conservative memory usage for shared memory limits)")
             elif gpu_type == "w7800":
                 print("Using W7800-optimized configurations (conservative memory usage)")
             else:
@@ -687,11 +702,13 @@ def main():
         output_mae = results['summary']['output_mae']['mean']
         
         # Show GPU-specific information
-        if self.is_rocm:
-            gpu_type = self._detect_gpu_type()
+        if tester.is_rocm:
+            gpu_type = tester._detect_gpu_type()
             print(f"GPU Type: {gpu_type.upper()}")
             if gpu_type == "mi250":
                 print("✅ MI250-optimized configurations used (128GB memory, aggressive parameters)")
+            elif gpu_type == "mi210":
+                print("✅ MI210-optimized configurations used (limited shared memory, conservative parameters)")
             elif gpu_type == "w7800":
                 print("✅ W7800-optimized configurations used (30GB memory, conservative parameters)")
             else:
