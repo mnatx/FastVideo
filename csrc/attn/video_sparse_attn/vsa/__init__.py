@@ -3,7 +3,9 @@ from typing import Tuple
 block_sparse_attn=None
 import torch
 major, minor = torch.cuda.get_device_capability(0)
-if major == 9 and minor == 0:# check if H100
+is_h100 = major == 9 and minor == 0
+is_rocm = torch.cuda.is_available() and hasattr(torch.version, 'hip') and torch.version.hip is not None
+if is_h100 and not is_rocm:# check if H100
     from vsa_cuda import block_sparse_fwd, block_sparse_bwd
     from vsa.block_sparse_wrapper import block_sparse_attn_SM90
     block_sparse_attn = block_sparse_attn_SM90
