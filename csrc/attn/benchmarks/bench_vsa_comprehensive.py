@@ -33,7 +33,9 @@ def detect_gpu_type():
         return "unknown"
     
     device_name = torch.cuda.get_device_name().lower()
-    if "mi250" in device_name or "instinct" in device_name:
+    if "mi210" in device_name:
+        return "mi210"
+    elif "mi250" in device_name:
         return "mi250"
     elif "w7800" in device_name or "radeon pro" in device_name:
         return "w7800"
@@ -47,6 +49,13 @@ def validate_config_for_gpu(batch, head, seq_len, headdim, gpu_type):
     if gpu_type == "mi250":
         # MI250 can handle very large configurations
         return total_elements <= 50000000  # 50M elements
+    elif gpu_type == "mi210":
+        # MI210 has limited shared memory (64KB vs 128KB on MI250)
+        # Conservative limits to avoid shared memory errors
+        # Also restrict head_dim to 64 to avoid shared memory issues
+        if headdim > 64:
+            return False
+        return total_elements <= 2000000   # 2M elements (slightly more permissive)
     elif gpu_type == "w7800":
         # W7800 has more conservative limits
         return total_elements <= 5000000   # 5M elements
@@ -111,6 +120,62 @@ def generate_gpu_specific_configs(gpu_type, quick=False):
                 (1, 16, 8192, 64, 1),
                 (1, 16, 16384, 64, 1),
                 (1, 32, 8192, 64, 1),
+            ]
+    
+    elif gpu_type == "mi210":
+        # MI210 configurations - very conservative for shared memory limitations
+        # MI210 has limited shared memory (64KB vs 128KB on MI250)
+        if quick:
+            configs = [
+                # Quick test configurations for MI210
+                (1, 4, 512, 64, 2),
+                (1, 8, 1024, 64, 4),
+                (1, 8, 2048, 64, 8),
+            ]
+        else:
+            configs = [
+                # Very conservative configurations for MI210
+                (1, 4, 512, 64, 1),
+                (1, 4, 512, 64, 2),
+                (1, 4, 512, 64, 4),
+                (1, 4, 512, 64, 8),
+                
+                (1, 4, 1024, 64, 1),
+                (1, 4, 1024, 64, 2),
+                (1, 4, 1024, 64, 4),
+                (1, 4, 1024, 64, 8),
+                
+                (1, 8, 512, 64, 1),
+                (1, 8, 512, 64, 2),
+                (1, 8, 512, 64, 4),
+                (1, 8, 512, 64, 8),
+                
+                (1, 8, 1024, 64, 1),
+                (1, 8, 1024, 64, 2),
+                (1, 8, 1024, 64, 4),
+                (1, 8, 1024, 64, 8),
+                
+                # Slightly larger sequences that still work
+                (1, 8, 1536, 64, 1),
+                (1, 8, 1536, 64, 2),
+                (1, 8, 1536, 64, 4),
+                (1, 8, 1536, 64, 8),
+                
+                (1, 4, 1536, 64, 1),
+                (1, 4, 1536, 64, 2),
+                (1, 4, 1536, 64, 4),
+                (1, 4, 1536, 64, 8),
+                
+                # Different head counts
+                (1, 2, 1024, 64, 4),
+                (1, 6, 1024, 64, 4),
+                (1, 12, 1024, 64, 4),
+                (1, 12, 1536, 64, 4),
+                
+                # Small batch sizes
+                (2, 4, 1024, 64, 4),
+                (2, 8, 512, 64, 4),
+                (2, 4, 1536, 64, 4),
             ]
     
     elif gpu_type == "w7800":
@@ -298,7 +363,7 @@ def main():
     parser = argparse.ArgumentParser(description='Comprehensive VSA Benchmark for ROCm')
     parser.add_argument('--output', type=str, default='vsa_benchmark_results.json', help='Output file for results')
     parser.add_argument('--quick', action='store_true', help='Run quick benchmark with fewer configurations')
-    parser.add_argument('--gpu-type', type=str, choices=['mi250', 'w7800', 'auto'], default='auto', 
+    parser.add_argument('--gpu-type', type=str, choices=['mi250', 'mi210', 'w7800', 'auto'], default='auto', 
                        help='Force specific GPU type (auto-detects if not specified)')
     args = parser.parse_args()
     
@@ -323,6 +388,8 @@ def main():
     # Show GPU-specific optimization info
     if gpu_type == "mi250":
         print("✅ Using MI250-optimized configurations (128GB memory, aggressive parameters)")
+    elif gpu_type == "mi210":
+        print("✅ Using MI210-optimized configurations (64KB shared memory, very conservative parameters)")
     elif gpu_type == "w7800":
         print("✅ Using W7800-optimized configurations (30GB memory, conservative parameters)")
     else:
@@ -411,6 +478,9 @@ def main():
         if gpu_type == "mi250":
             print("  ✅ MI250: Large memory capacity enables testing of very long sequences and large batch sizes")
             print("  ✅ Optimal for: Long video sequences, high-throughput processing, large models")
+        elif gpu_type == "mi210":
+            print("  ✅ MI210: Limited shared memory (64KB) requires very conservative configurations")
+            print("  ✅ Optimal for: Short to medium video sequences, memory-constrained applications")
         elif gpu_type == "w7800":
             print("  ✅ W7800: Conservative memory usage optimized for professional workloads")
             print("  ✅ Optimal for: Standard video processing, moderate sequence lengths, efficient resource usage")
