@@ -41,6 +41,13 @@ def is_mi210_gpu():
     device_name = torch.cuda.get_device_name().lower()
     return 'mi210' in device_name
 
+def is_mi300_gpu():
+    """Check if we're running on AMD Instinct MI300/MI300X GPU."""
+    if not is_rocm_platform():
+        return False
+    device_name = torch.cuda.get_device_name().lower()
+    return 'mi300' in device_name
+
 def get_platform_info():
     """Get platform information for debugging."""
     if torch.cuda.is_available():
@@ -48,7 +55,9 @@ def get_platform_info():
         device_count = torch.cuda.device_count()
         if is_rocm_platform():
             hip_version = torch.version.hip
-            if is_mi250_gpu():
+            if is_mi300_gpu():
+                gpu_type = "MI300"
+            elif is_mi250_gpu():
                 gpu_type = "MI250"
             elif is_mi210_gpu():
                 gpu_type = "MI210"
@@ -176,11 +185,20 @@ def check_correctness(h, d, num_blocks, k, num_iterations=20, error_mode='all'):
 def generate_error_graphs(h, d, error_mode='all'):
     # Check if we're on ROCm and adjust parameters accordingly
     is_rocm = is_rocm_platform()
+    is_mi300 = is_mi300_gpu()
     is_mi250 = is_mi250_gpu()
     is_mi210 = is_mi210_gpu()
     
     if is_rocm:
-        if is_mi250:
+        if is_mi300:
+            # Use MI300-optimized parameters (conservative but better than generic ROCm)
+            test_configs = [
+                {"num_blocks": 8, "k": 2, "description": "Small sequence (MI300)"},
+                {"num_blocks": 16, "k": 4, "description": "Medium sequence (MI300)"},
+                {"num_blocks": 24, "k": 6, "description": "Large sequence (MI300)"},
+            ]
+            print(f"\nError Analysis for h={h}, d={d}, mode={error_mode} (MI300 optimized)")
+        elif is_mi250:
             # Use MI250-optimized parameters (can handle larger dimensions)
             test_configs = [
                 {"num_blocks": 16, "k": 2, "description": "Small sequence (MI250)"},
@@ -248,6 +266,7 @@ def generate_error_graphs(h, d, error_mode='all'):
 if __name__ == "__main__":
     # Check if we're on ROCm and adjust parameters accordingly
     is_rocm = is_rocm_platform()
+    is_mi300 = is_mi300_gpu()
     is_mi250 = is_mi250_gpu()
     is_mi210 = is_mi210_gpu()
     platform_info = get_platform_info()
@@ -256,7 +275,13 @@ if __name__ == "__main__":
     print(f"PyTorch version: {torch.__version__}")
     
     if is_rocm:
-        if is_mi250:
+        if is_mi300:
+            # Use MI300-optimized parameters (conservative but better than generic ROCm)
+            h, d = 8, 64
+            print("\nBlock Sparse Attention with Variable Block Sizes Analysis (MI300 Optimized)")
+            print("=" * 70)
+            print("Using MI300-optimized parameters - MI300 optimized for better performance")
+        elif is_mi250:
             # Use MI250-optimized parameters (can handle larger dimensions)
             h, d = 16, 128
             print("\nBlock Sparse Attention with Variable Block Sizes Analysis (MI250 Optimized)")

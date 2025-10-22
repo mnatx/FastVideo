@@ -20,7 +20,14 @@ def is_mi250_gpu():
     if not is_rocm_platform():
         return False
     device_name = torch.cuda.get_device_name().lower()
-    return 'mi250' in device_name or 'instinct' in device_name
+    return 'mi250' in device_name
+
+def is_mi300_gpu():
+    """Check if we're running on AMD Instinct MI300/MI300X GPU."""
+    if not is_rocm_platform():
+        return False
+    device_name = torch.cuda.get_device_name().lower()
+    return 'mi300' in device_name
 
 def get_platform_info():
     """Get platform information."""
@@ -29,7 +36,12 @@ def get_platform_info():
         device_count = torch.cuda.device_count()
         if is_rocm_platform():
             hip_version = torch.version.hip
-            gpu_type = "MI250" if is_mi250_gpu() else "Other ROCm GPU"
+            if is_mi300_gpu():
+                gpu_type = "MI300"
+            elif is_mi250_gpu():
+                gpu_type = "MI250"
+            else:
+                gpu_type = "Other ROCm GPU"
             return f"ROCm (HIP {hip_version}) - {device_name} ({device_count} devices) [{gpu_type}]"
         else:
             return f"CUDA - {device_name} ({device_count} devices)"
@@ -44,10 +56,26 @@ def main():
     print()
     
     is_rocm = is_rocm_platform()
+    is_mi300 = is_mi300_gpu()
     is_mi250 = is_mi250_gpu()
     
     if is_rocm:
-        if is_mi250:
+        if is_mi300:
+            print("ROCm Platform Detected - AMD Instinct MI300/MI300X GPU:")
+            print("-" * 50)
+            print("Original Parameters (would cause shared memory error on W7800):")
+            print("  h=16, d=128, num_blocks=[16, 32, 53], k=[2, 4, 6]")
+            print()
+            print("MI300 Optimized Parameters (recommended):")
+            print("  h=8, d=64, num_blocks=[8, 16, 24], k=[2, 4, 6]")
+            print()
+            print("Benefits:")
+            print("  ✓ MI300 optimized parameters for better performance than generic ROCm")
+            print("  ✓ Uses larger block counts and head dimensions than conservative ROCm settings")
+            print("  ✓ Balances performance with shared memory constraints")
+            print("  ✓ Maintains same test structure and accuracy metrics")
+            print("  ✓ Automatically detects MI300 and uses appropriate parameters")
+        elif is_mi250:
             print("ROCm Platform Detected - AMD Instinct MI250 GPU:")
             print("-" * 50)
             print("Original Parameters (would cause shared memory error on W7800):")

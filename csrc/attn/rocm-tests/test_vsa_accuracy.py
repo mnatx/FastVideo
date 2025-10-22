@@ -309,7 +309,9 @@ class ComprehensiveVSATester:
             return "unknown"
         
         device_name = torch.cuda.get_device_name().lower()
-        if "mi250" in device_name:
+        if "mi300" in device_name:
+            return "mi300"
+        elif "mi250" in device_name:
             return "mi250"
         elif "mi210" in device_name:
             return "mi210"
@@ -326,7 +328,10 @@ class ComprehensiveVSATester:
         gpu_type = self._detect_gpu_type()
         total_elements = config.batch_size * config.num_heads * config.seq_len * config.head_dim
         
-        if gpu_type == "mi250":
+        if gpu_type == "mi300":
+            # MI300 can handle large configurations but still has shared memory limits
+            return total_elements <= 5000000   # 5M elements
+        elif gpu_type == "mi250":
             # MI250 can handle very large configurations
             return total_elements <= 10000000  # 10M elements
         elif gpu_type == "mi210":
@@ -346,7 +351,15 @@ class ComprehensiveVSATester:
         if self.is_rocm:
             gpu_type = self._detect_gpu_type()
             
-            if gpu_type == "mi250":
+            if gpu_type == "mi300":
+                # MI300 configurations - optimized for high performance but respecting shared memory limits
+                # MI300 has high compute capacity but same shared memory constraints as other ROCm GPUs
+                batch_sizes = [1, 2, 4]  # Moderate batch sizes
+                num_heads_list = [4, 8, 16]  # Good head counts
+                seq_lens = [64, 128, 256, 512, 1024, 2048]  # Longer sequences
+                head_dims = [64]  # Use 64 to avoid shared memory issues with head_dim=128
+                top_k_list = [2, 4, 8, 16, 32]  # Good top-k range
+            elif gpu_type == "mi250":
                 # MI250 configurations - optimized for larger memory capacity
                 # MI250 has 128GB memory vs W7800's 30GB, allowing for more aggressive configs
                 batch_sizes = [1, 2, 4, 8]  # Increased batch sizes
@@ -421,7 +434,9 @@ class ComprehensiveVSATester:
         if self.is_rocm:
             gpu_type = self._detect_gpu_type()
             print(f"GPU Type detected: {gpu_type.upper()}")
-            if gpu_type == "mi250":
+            if gpu_type == "mi300":
+                print("Using MI300-optimized configurations (high performance with shared memory constraints)")
+            elif gpu_type == "mi250":
                 print("Using MI250-optimized configurations (larger batch sizes, longer sequences)")
             elif gpu_type == "mi210":
                 print("Using MI210-optimized configurations (conservative memory usage for shared memory limits)")
@@ -705,7 +720,9 @@ def main():
         if tester.is_rocm:
             gpu_type = tester._detect_gpu_type()
             print(f"GPU Type: {gpu_type.upper()}")
-            if gpu_type == "mi250":
+            if gpu_type == "mi300":
+                print("✅ MI300-optimized configurations used (high performance with shared memory constraints)")
+            elif gpu_type == "mi250":
                 print("✅ MI250-optimized configurations used (128GB memory, aggressive parameters)")
             elif gpu_type == "mi210":
                 print("✅ MI210-optimized configurations used (limited shared memory, conservative parameters)")
