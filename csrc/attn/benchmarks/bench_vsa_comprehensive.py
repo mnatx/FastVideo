@@ -33,7 +33,9 @@ def detect_gpu_type():
         return "unknown"
     
     device_name = torch.cuda.get_device_name().lower()
-    if "mi210" in device_name:
+    if "mi300x" in device_name or "mi300" in device_name:
+        return "mi300x"
+    elif "mi210" in device_name:
         return "mi210"
     elif "mi250" in device_name:
         return "mi250"
@@ -46,7 +48,10 @@ def validate_config_for_gpu(batch, head, seq_len, headdim, gpu_type):
     """Validate if a configuration is appropriate for the detected GPU."""
     total_elements = batch * head * seq_len * headdim
     
-    if gpu_type == "mi250":
+    if gpu_type == "mi300x":
+        # MI300X can handle extremely large configurations with 192GB memory
+        return total_elements <= 100000000  # 100M elements
+    elif gpu_type == "mi250":
         # MI250 can handle very large configurations
         return total_elements <= 50000000  # 50M elements
     elif gpu_type == "mi210":
@@ -65,7 +70,83 @@ def validate_config_for_gpu(batch, head, seq_len, headdim, gpu_type):
 
 def generate_gpu_specific_configs(gpu_type, quick=False):
     """Generate configurations appropriate for the detected GPU type."""
-    if gpu_type == "mi250":
+    if gpu_type == "mi300x":
+        # MI300X configurations - extremely aggressive parameters for 192GB memory
+        if quick:
+            configs = [
+                # Quick test configurations for MI300X
+                (1, 32, 4096, 64, 4),
+                (2, 32, 8192, 64, 8),
+                (1, 32, 16384, 64, 16),
+            ]
+        else:
+            configs = [
+                # Different sequence lengths with MI300X-optimized parameters
+                (1, 32, 2048, 64, 1),
+                (1, 32, 2048, 64, 2),
+                (1, 32, 2048, 64, 4),
+                (1, 32, 2048, 64, 8),
+                (1, 32, 2048, 64, 16),
+                
+                (1, 32, 4096, 64, 1),
+                (1, 32, 4096, 64, 2),
+                (1, 32, 4096, 64, 4),
+                (1, 32, 4096, 64, 8),
+                (1, 32, 4096, 64, 16),
+                
+                (1, 32, 8192, 64, 1),
+                (1, 32, 8192, 64, 2),
+                (1, 32, 8192, 64, 4),
+                (1, 32, 8192, 64, 8),
+                (1, 32, 8192, 64, 16),
+                
+                (1, 32, 16384, 64, 1),
+                (1, 32, 16384, 64, 2),
+                (1, 32, 16384, 64, 4),
+                (1, 32, 16384, 64, 8),
+                (1, 32, 16384, 64, 16),
+                
+                # Very long sequences for MI300X
+                (1, 32, 32768, 64, 1),
+                (1, 32, 32768, 64, 2),
+                (1, 32, 32768, 64, 4),
+                (1, 32, 32768, 64, 8),
+                
+                # Ultra-long sequences
+                (1, 32, 65536, 64, 1),
+                (1, 32, 65536, 64, 2),
+                (1, 32, 65536, 64, 4),
+                
+                # Different head counts
+                (1, 16, 16384, 64, 8),
+                (1, 24, 16384, 64, 8),
+                (1, 40, 16384, 64, 8),
+                (1, 48, 16384, 64, 8),
+                (1, 64, 16384, 64, 8),
+                
+                # Different head dimensions
+                (1, 32, 16384, 128, 8),
+                (1, 32, 16384, 256, 8),
+                (1, 32, 16384, 512, 8),
+                
+                # Large batch sizes
+                (2, 32, 16384, 64, 8),
+                (4, 32, 16384, 64, 8),
+                (8, 32, 16384, 64, 8),
+                (16, 32, 16384, 64, 8),
+                
+                # High sparsity configurations
+                (1, 32, 32768, 64, 1),
+                (1, 32, 65536, 64, 1),
+                (1, 64, 16384, 64, 1),
+                
+                # Memory-intensive configurations
+                (1, 32, 131072, 64, 1),  # 131K sequence length
+                (1, 32, 131072, 64, 2),
+                (1, 32, 131072, 64, 4),
+            ]
+    
+    elif gpu_type == "mi250":
         # MI250 configurations - aggressive parameters for 128GB memory
         if quick:
             configs = [
@@ -363,7 +444,7 @@ def main():
     parser = argparse.ArgumentParser(description='Comprehensive VSA Benchmark for ROCm')
     parser.add_argument('--output', type=str, default='vsa_benchmark_results.json', help='Output file for results')
     parser.add_argument('--quick', action='store_true', help='Run quick benchmark with fewer configurations')
-    parser.add_argument('--gpu-type', type=str, choices=['mi250', 'mi210', 'w7800', 'auto'], default='auto', 
+    parser.add_argument('--gpu-type', type=str, choices=['mi300x', 'mi250', 'mi210', 'w7800', 'auto'], default='auto', 
                        help='Force specific GPU type (auto-detects if not specified)')
     args = parser.parse_args()
     
@@ -386,7 +467,9 @@ def main():
     print(f"Triton Version: {triton.__version__}")
     
     # Show GPU-specific optimization info
-    if gpu_type == "mi250":
+    if gpu_type == "mi300x":
+        print("✅ Using MI300X-optimized configurations (192GB memory, extremely aggressive parameters)")
+    elif gpu_type == "mi250":
         print("✅ Using MI250-optimized configurations (128GB memory, aggressive parameters)")
     elif gpu_type == "mi210":
         print("✅ Using MI210-optimized configurations (64KB shared memory, very conservative parameters)")
@@ -475,7 +558,10 @@ def main():
         
         # GPU-specific insights
         print(f"\nGPU-Specific Performance Insights:")
-        if gpu_type == "mi250":
+        if gpu_type == "mi300x":
+            print("  ✅ MI300X: Massive memory capacity (192GB) enables testing of ultra-long sequences and very large batch sizes")
+            print("  ✅ Optimal for: Ultra-long video sequences, massive models, high-throughput processing, research applications")
+        elif gpu_type == "mi250":
             print("  ✅ MI250: Large memory capacity enables testing of very long sequences and large batch sizes")
             print("  ✅ Optimal for: Long video sequences, high-throughput processing, large models")
         elif gpu_type == "mi210":
