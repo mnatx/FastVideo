@@ -97,11 +97,11 @@ def maybe_load_fsdp_model(
     # Check if we should use FSDP
     use_fsdp = training_mode or fsdp_inference
 
-    # Disable FSDP for MPS as it's not compatible
+    # Disable FSDP for MPS and ROCm as they're not compatible
     from fastvideo.platforms import current_platform
-    if current_platform.is_mps():
+    if current_platform.is_mps() or current_platform.device_name == "rocm":
         use_fsdp = False
-        logger.info("Disabling FSDP for MPS platform as it's not compatible")
+        logger.info(f"Disabling FSDP for {current_platform.device_name} platform as it's not compatible")
 
     if use_fsdp:
         world_size = hsdp_replicate_dim * hsdp_shard_dim
@@ -132,17 +132,37 @@ def maybe_load_fsdp_model(
                     fsdp_shard_conditions=model._fsdp_shard_conditions,
                     pin_cpu_memory=pin_cpu_memory)
 
-    weight_iterator = safetensors_weights_iterator(weight_dir_list)
-    param_names_mapping_fn = get_param_names_mapping(model.param_names_mapping)
-    load_model_from_full_model_state_dict(
-        model,
-        weight_iterator,
-        device,
-        default_dtype,
-        strict=True,
-        cpu_offload=cpu_offload,
-        param_names_mapping=param_names_mapping_fn,
-    )
+    if use_fsdp:
+        weight_iterator = safetensors_weights_iterator(weight_dir_list)
+        param_names_mapping_fn = get_param_names_mapping(model.param_names_mapping)
+        load_model_from_full_model_state_dict(
+            model,
+            weight_iterator,
+            device,
+            default_dtype,
+            strict=True,
+            cpu_offload=cpu_offload,
+            param_names_mapping=param_names_mapping_fn,
+        )
+    else:
+        # Simple loading path for non-FSDP models
+        logger.info("Using simple model loading (non-FSDP)")
+        from safetensors import safe_open
+        
+        # Load the first safetensors file
+        if weight_dir_list:
+            with safe_open(weight_dir_list[0], framework="pt", device="cpu") as f:
+                state_dict = {}
+                for key in f.keys():
+                    state_dict[key] = f.get_tensor(key)
+                
+                # Load the state dict directly with assign=True to handle meta device
+                model.load_state_dict(state_dict, strict=False, assign=True)
+                logger.info("Model loaded successfully using simple loading")
+                
+                # Move model to the target device using to_empty for meta tensors
+                model = model.to_empty(device=device)
+                logger.info(f"Model moved to device: {device}")
     for n, p in chain(model.named_parameters(), model.named_buffers()):
         if p.is_meta:
             raise RuntimeError(

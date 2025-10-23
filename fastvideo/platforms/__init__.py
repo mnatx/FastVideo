@@ -97,16 +97,15 @@ def rocm_platform_plugin() -> str | None:
     is_rocm = False
 
     try:
-        import amdsmi
-        amdsmi.amdsmi_init()
-        try:
-            if len(amdsmi.amdsmi_get_processor_handles()) > 0:
+        import torch
+        # Check if PyTorch was compiled with ROCm support
+        if hasattr(torch.version, 'hip') and torch.version.hip:
+            # Additional check: ensure CUDA is available (ROCm uses CUDA interface)
+            if torch.cuda.is_available():
                 is_rocm = True
-                logger.info("ROCm platform is available")
-        finally:
-            amdsmi.amdsmi_shut_down()
+                logger.info("ROCm platform is available (detected via PyTorch)")
     except Exception as e:
-        logger.info("ROCm platform is unavailable: %s", e)
+        logger.info("ROCm platform detection failed: %s", e)
 
     return "fastvideo.platforms.rocm.RocmPlatform" if is_rocm else None
 

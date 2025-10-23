@@ -132,5 +132,12 @@ class RocmPlatform(Platform):
         return "fastvideo.attention.backends.flash_attn.FlashAttentionBackend"
 
     @classmethod
+    def get_torch_device(cls):
+        """
+        Return torch.cuda (ROCm uses CUDA interface)
+        """
+        return torch.cuda
+
+    @classmethod
     def get_device_communicator_cls(cls) -> str:
         return "fastvideo.distributed.device_communicators.cuda_communicator.CudaCommunicator"  # works for ROCm too
