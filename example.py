@@ -3,7 +3,7 @@ from fastvideo import VideoGenerator
 from fastvideo.fastvideo_args import FastVideoArgs
 
 def main():
-    os.environ["FASTVIDEO_ATTENTION_BACKEND"] = "TORCH_SDPA"
+    os.environ["FASTVIDEO_ATTENTION_BACKEND"] = "VIDEO_SPARSE_ATTN"
 
     # Create a video generator with a pre-trained model
     generator = VideoGenerator.from_pretrained(
