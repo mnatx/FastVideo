@@ -226,8 +226,24 @@ def video_sparse_attn(q, k, v, variable_block_sizes, topk, block_size, compress_
     else:
         # Use Triton implementation (works on both CUDA and ROCm)
         B, H, T, D = q.shape
-        # Create block map for sparse attention
-        block_map = torch.ones((B, H, T // block_size[0], T // block_size[0]), 
+        # Ensure sequence length is divisible by 64 for Triton kernel
+        pad_length = 0
+        if T % 64 != 0:
+            # Pad to nearest multiple of 64
+            pad_length = 64 - (T % 64)
+            q = torch.nn.functional.pad(q, (0, 0, 0, pad_length), value=0)
+            k = torch.nn.functional.pad(k, (0, 0, 0, pad_length), value=0)
+            v = torch.nn.functional.pad(v, (0, 0, 0, pad_length), value=0)
+            T = q.shape[2]
+        
+        # Create block map for sparse attention - Triton expects T // 64
+        num_blocks = T // 64
+        block_map = torch.ones((B, H, num_blocks, num_blocks), 
                               device=q.device, dtype=torch.bool)
         o_padded, M = block_sparse_attn_triton(q, k, v, block_map, variable_block_sizes)
+        
+        # Remove padding if we added it
+        if pad_length > 0:
+            o_padded = o_padded[:, :, :T-pad_length, :]
+        
         return o_padded

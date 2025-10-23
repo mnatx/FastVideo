@@ -101,10 +101,13 @@ def _attn_fwd_sparse(Q, K, V, sm_scale,                         #
     for i in range(0, kv_blocks):
         kv_idx = tl.load(kv_ptr + i).to(tl.int32)
         block_size = tl.load(variable_block_sizes + kv_idx)
-        K_ptr = tl.advance(K_base, (0, kv_idx * BLOCK_N))
-        V_ptr = tl.advance(V_base, (kv_idx * BLOCK_N, 0))
+        # Use direct pointer arithmetic instead of tl.advance for ROCm compatibility
+        K_ptr = K_base + kv_idx * BLOCK_N * stride_kn
+        V_ptr = V_base + kv_idx * BLOCK_N * stride_vk
 
-        k = tl.load(K_ptr)
+        # Load K with proper indexing - K is [HEAD_DIM, N_CTX] so we need to transpose
+        k_offsets = kv_idx * BLOCK_N + tl.arange(0, BLOCK_N)
+        k = tl.load(K + qvk_off + tl.arange(0, HEAD_DIM)[:, None] * stride_kk + k_offsets[None, :] * stride_kn)
         qk = tl.dot(q, k)
         # mask out invalid columns
         mask = tl.arange(0, BLOCK_N) < block_size
@@ -118,7 +121,9 @@ def _attn_fwd_sparse(Q, K, V, sm_scale,                         #
         l_i = l_i * alpha + l_ij
         acc = acc * alpha[:, None]
 
-        v = tl.load(V_ptr)
+        # Load V with proper indexing - V is [N_CTX, HEAD_DIM]
+        v_offsets = kv_idx * BLOCK_N + tl.arange(0, BLOCK_N)
+        v = tl.load(V + qvk_off + v_offsets[:, None] * stride_vk + tl.arange(0, HEAD_DIM)[None, :] * stride_vn)
         acc = tl.dot(p.to(tl.bfloat16), v, acc)
         m_i = m_ij
 
@@ -187,7 +192,9 @@ def _attn_bwd_dkdv(dk, dv,  #
         
     for blk_idx in range(q_blocks*2):
         block_sparse_offset = (tl.load(q_ptr + blk_idx//2).to(tl.int32)*2 + blk_idx%2) *step_m
-        qT = tl.load(qT_ptrs + block_sparse_offset * stride_tok)
+        # Use direct indexing instead of pointer arithmetic
+        qT_offsets = block_sparse_offset + tl.arange(0, BLOCK_M1)
+        qT = tl.load(Q + qT_offsets[None, :] * stride_tok + offs_k[:, None] * stride_d)
         # Load m before computing qk to reduce pipeline stall.
         offs_m = start_m + block_sparse_offset + tl.arange(0, BLOCK_M1)
         m = tl.load(M + offs_m)
@@ -196,7 +203,8 @@ def _attn_bwd_dkdv(dk, dv,  #
         mask = tl.arange(0, BLOCK_N1) < block_size
         pT = tl.where(mask[:, None], pT, 0.0)
 
-        do = tl.load(do_ptrs + block_sparse_offset * stride_tok)
+        do_offsets = block_sparse_offset + tl.arange(0, BLOCK_M1)
+        do = tl.load(DO + do_offsets[:, None] * stride_tok + offs_k[None, :] * stride_d)
         # Compute dV.
         ppT = pT
         ppT = ppT.to(tl.bfloat16)
@@ -250,10 +258,13 @@ def _attn_bwd_dq(dq, q, K, V,  #
     
     
     for blk_idx in range(kv_blocks*2):
-        block_sparse_offset = (tl.load(kv_ptr + blk_idx//2).to(tl.int32)*2 + blk_idx%2) *step_n * stride_tok
+        block_sparse_offset = (tl.load(kv_ptr + blk_idx//2).to(tl.int32)*2 + blk_idx%2) *step_n
         block_size = tl.load(variable_block_sizes + blk_idx//2) - (blk_idx%2) * step_n
-        kT = tl.load(kT_ptrs + block_sparse_offset)
-        vT = tl.load(vT_ptrs + block_sparse_offset)
+        # Use direct indexing instead of pointer arithmetic
+        kT_offsets = block_sparse_offset + tl.arange(0, BLOCK_N2)
+        vT_offsets = block_sparse_offset + tl.arange(0, BLOCK_N2)
+        kT = tl.load(K + kT_offsets[None, :] * stride_tok + offs_k[:, None] * stride_d)
+        vT = tl.load(V + vT_offsets[None, :] * stride_tok + offs_k[:, None] * stride_d)
         qk = tl.dot(q, kT)
         p = tl.math.exp2(qk - m)
         mask = tl.arange(0, BLOCK_N2) < block_size.to(tl.int32)
