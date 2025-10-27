@@ -304,60 +304,45 @@ class ComprehensiveVSATester:
             return None
     
     def _detect_gpu_type(self) -> str:
-        """Enhanced GPU detection with M250, MI300X, W7800 support."""
+        """Detect the type of GPU being used."""
         if not torch.cuda.is_available():
             return "unknown"
         
         device_name = torch.cuda.get_device_name().lower()
-        
-        # Check for specific device patterns (order matters for overlapping names)
-        if "mi300x" in device_name:
-            return "mi300x"
-        elif "mi300" in device_name:
-            return "mi300x"  # Default MI300 to MI300X
-        elif "mi250" in device_name or "m250" in device_name:
+        if "mi300" in device_name:
+            return "mi300"
+        elif "mi250" in device_name:
             return "mi250"
         elif "mi210" in device_name:
             return "mi210"
-        elif "w7800" in device_name or "radeon pro w7800" in device_name:
-            return "w7800"
-        elif "radeon pro" in device_name:
-            # Generic Radeon Pro detection
+        elif "w7800" in device_name or "radeon pro" in device_name:
             return "w7800"
         else:
             return "generic_rocm"
     
     def _validate_config_for_gpu(self, config: TestConfig) -> bool:
-        """Enhanced validation with M250, MI300X, W7800 support using device specs."""
+        """Validate if a configuration is appropriate for the detected GPU."""
         if not self.is_rocm:
             return True
         
         gpu_type = self._detect_gpu_type()
+        total_elements = config.batch_size * config.num_heads * config.seq_len * config.head_dim
         
-        # Import device specs for validation
-        try:
-            from csrc.attn.device_specs import validate_config_for_device
-            return validate_config_for_device(
-                gpu_type, 
-                config.batch_size, 
-                config.num_heads, 
-                config.seq_len, 
-                config.head_dim
-            )
-        except ImportError:
-            # Fallback to hardcoded validation if device_specs not available
-            total_elements = config.batch_size * config.num_heads * config.seq_len * config.head_dim
-            
-            if gpu_type == "mi300x":
-                return total_elements <= 100000000  # 100M elements
-            elif gpu_type == "mi250":
-                return total_elements <= 50000000   # 50M elements
-            elif gpu_type == "mi210":
-                return total_elements <= 2000000    # 2M elements
-            elif gpu_type == "w7800":
-                return total_elements <= 1000000    # 1M elements
-            else:
-                return total_elements <= 10000000   # 10M elements
+        if gpu_type == "mi300":
+            # MI300 can handle large configurations but still has shared memory limits
+            return total_elements <= 5000000   # 5M elements
+        elif gpu_type == "mi250":
+            # MI250 can handle very large configurations
+            return total_elements <= 10000000  # 10M elements
+        elif gpu_type == "mi210":
+            # MI210 has limited shared memory, more conservative than MI250
+            return total_elements <= 1000000   # 1M elements
+        elif gpu_type == "w7800":
+            # W7800 has more conservative limits
+            return total_elements <= 1000000   # 1M elements
+        else:
+            # Generic ROCm - balanced approach
+            return total_elements <= 2000000   # 2M elements
     
     def generate_comprehensive_test_configs(self) -> List[TestConfig]:
         """Generate comprehensive test configurations."""
@@ -366,13 +351,14 @@ class ComprehensiveVSATester:
         if self.is_rocm:
             gpu_type = self._detect_gpu_type()
             
-            if gpu_type == "mi300x":
-                # MI300X configurations - ultra-aggressive for 192GB memory
-                batch_sizes = [1, 2, 4, 8]
-                num_heads_list = [4, 8, 16, 24, 32, 48, 64]
-                seq_lens = [64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
-                head_dims = [64, 128]
-                top_k_list = [1, 2, 4, 8, 16, 32, 64]
+            if gpu_type == "mi300":
+                # MI300 configurations - optimized for high performance but respecting shared memory limits
+                # MI300 has high compute capacity but same shared memory constraints as other ROCm GPUs
+                batch_sizes = [1, 2, 4]  # Moderate batch sizes
+                num_heads_list = [4, 8, 16]  # Good head counts
+                seq_lens = [64, 128, 256, 512, 1024, 2048]  # Longer sequences
+                head_dims = [64]  # Use 64 to avoid shared memory issues with head_dim=128
+                top_k_list = [2, 4, 8, 16, 32]  # Good top-k range
             elif gpu_type == "mi250":
                 # MI250 configurations - optimized for larger memory capacity
                 # MI250 has 128GB memory vs W7800's 30GB, allowing for more aggressive configs

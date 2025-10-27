@@ -29,65 +29,6 @@ class RocmPlatform(Platform):
     def get_device_capability(cls, device_id: int = 0) -> DeviceCapability:
         major, minor = torch.cuda.get_device_capability(device_id)
         return DeviceCapability(major=major, minor=minor)
-    
-    @classmethod
-    def detect_rocm_device_type(cls, device_id: int = 0) -> str:
-        """Detect the specific ROCm device type for optimal configuration."""
-        if not torch.cuda.is_available():
-            return "unknown"
-        
-        try:
-            device_name = torch.cuda.get_device_name(device_id).lower()
-            
-            # Check for specific device patterns (order matters for overlapping names)
-            if "mi300x" in device_name:
-                return "mi300x"
-            elif "mi300" in device_name:
-                return "mi300x"  # Default MI300 to MI300X
-            elif "mi250" in device_name or "m250" in device_name:
-                return "mi250"
-            elif "mi210" in device_name:
-                return "mi210"
-            elif "w7800" in device_name or "radeon pro w7800" in device_name:
-                return "w7800"
-            elif "radeon pro" in device_name:
-                return "w7800"
-            else:
-                return "generic_rocm"
-        except:
-            return "generic_rocm"
-    
-    @classmethod
-    def get_device_shared_memory_limit(cls, device_id: int = 0) -> int:
-        """Get device-specific shared memory limit in bytes."""
-        device_type = cls.detect_rocm_device_type(device_id)
-        
-        # Device-specific shared memory limits (in bytes)
-        shared_memory_limits = {
-            "mi300x": 65536,   # 64KB
-            "mi250": 131072,   # 128KB
-            "mi210": 65536,    # 64KB
-            "w7800": 32768,    # 32KB
-            "generic_rocm": 65536  # 64KB default
-        }
-        
-        return shared_memory_limits.get(device_type, 65536)
-    
-    @classmethod
-    def get_optimal_block_size(cls, device_id: int = 0) -> tuple:
-        """Get optimal block size for the detected device."""
-        device_type = cls.detect_rocm_device_type(device_id)
-        
-        # Device-specific optimal block sizes
-        block_sizes = {
-            "mi300x": (32, 32),
-            "mi250": (64, 64),
-            "mi210": (32, 32),
-            "w7800": (16, 16),
-            "generic_rocm": (32, 32)
-        }
-        
-        return block_sizes.get(device_type, (32, 32))
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
