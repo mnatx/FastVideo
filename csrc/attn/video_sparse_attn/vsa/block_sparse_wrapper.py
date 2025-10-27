@@ -226,18 +226,38 @@ def video_sparse_attn(q, k, v, variable_block_sizes, topk, block_size, compress_
     else:
         # Use Triton implementation (works on both CUDA and ROCm)
         B, H, T, D = q.shape
-        # Ensure sequence length is divisible by 64 for Triton kernel
+        # Device-specific block size detection for Triton kernel
+        try:
+            import torch
+            if torch.cuda.is_available() and hasattr(torch.version, 'hip') and torch.version.hip is not None:
+                device_name = torch.cuda.get_device_name().lower()
+                
+                if "w7800" in device_name or "radeon pro" in device_name:
+                    # W7800: Most conservative, use 16-element blocks
+                    target_block_size = 16
+                elif "mi250" in device_name or "m250" in device_name:
+                    # MI250: Can use larger blocks due to 128KB shared memory
+                    target_block_size = 64
+                else:
+                    # MI210, MI300X, generic: Use 32-element blocks
+                    target_block_size = 32
+            else:
+                target_block_size = 32
+        except:
+            target_block_size = 32
+        
+        # Ensure sequence length is divisible by target block size
         pad_length = 0
-        if T % 64 != 0:
-            # Pad to nearest multiple of 64
-            pad_length = 64 - (T % 64)
+        if T % target_block_size != 0:
+            # Pad to nearest multiple of target block size
+            pad_length = target_block_size - (T % target_block_size)
             q = torch.nn.functional.pad(q, (0, 0, 0, pad_length), value=0)
             k = torch.nn.functional.pad(k, (0, 0, 0, pad_length), value=0)
             v = torch.nn.functional.pad(v, (0, 0, 0, pad_length), value=0)
             T = q.shape[2]
         
-        # Create block map for sparse attention - Triton expects T // 64
-        num_blocks = T // 64
+        # Create block map for sparse attention - Triton expects T // target_block_size
+        num_blocks = T // target_block_size
         block_map = torch.ones((B, H, num_blocks, num_blocks), 
                               device=q.device, dtype=torch.bool)
         o_padded, M = block_sparse_attn_triton(q, k, v, block_map, variable_block_sizes)

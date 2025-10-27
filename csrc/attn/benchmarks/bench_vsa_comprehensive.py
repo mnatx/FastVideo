@@ -28,18 +28,25 @@ def set_seed(seed: int = 42):
     torch.cuda.manual_seed_all(seed)
 
 def detect_gpu_type():
-    """Detect the type of GPU being used."""
+    """Enhanced GPU detection with M250, MI300X, W7800 support."""
     if not torch.cuda.is_available():
         return "unknown"
     
     device_name = torch.cuda.get_device_name().lower()
-    if "mi300x" in device_name or "mi300" in device_name:
+    
+    # Check for specific device patterns (order matters for overlapping names)
+    if "mi300x" in device_name:
         return "mi300x"
+    elif "mi300" in device_name:
+        return "mi300x"  # Default MI300 to MI300X
+    elif "mi250" in device_name or "m250" in device_name:
+        return "mi250"
     elif "mi210" in device_name:
         return "mi210"
-    elif "mi250" in device_name:
-        return "mi250"
-    elif "w7800" in device_name or "radeon pro" in device_name:
+    elif "w7800" in device_name or "radeon pro w7800" in device_name:
+        return "w7800"
+    elif "radeon pro" in device_name:
+        # Generic Radeon Pro detection
         return "w7800"
     else:
         return "generic_rocm"

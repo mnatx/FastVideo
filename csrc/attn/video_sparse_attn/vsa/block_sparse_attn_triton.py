@@ -21,13 +21,65 @@ import math  # small utility needed by the sparse wrapper
 # We don't run auto-tuning every time to keep the tutorial fast. Keeping
 # the code below and commenting out the equivalent parameters is convenient for
 # re-tuning.
-configs = [
-    triton.Config({'BLOCK_M': BM, 'BLOCK_N': BN}, num_stages=s, num_warps=w) \
-    for BM in [64]\
-    for BN in [64]\
-    for s in [3, 4, 7]\
-    for w in [4, 8]\
-]
+
+def get_device_triton_configs():
+    """Get device-specific Triton configurations based on detected GPU."""
+    try:
+        # Detect device type using torch
+        import torch
+        if torch.cuda.is_available() and hasattr(torch.version, 'hip') and torch.version.hip is not None:
+            device_name = torch.cuda.get_device_name().lower()
+            
+            if "mi300x" in device_name or "mi300" in device_name:
+                # MI300X: High performance configs (same shared memory as MI210)
+                return [
+                    triton.Config({'BLOCK_M': BM, 'BLOCK_N': BN}, num_stages=s, num_warps=w) \
+                    for BM in [32, 64]\
+                    for BN in [32, 64]\
+                    for s in [1, 2, 3]\
+                    for w in [2, 4, 8]\
+                ]
+            elif "mi250" in device_name or "m250" in device_name:
+                # MI250: Aggressive configs for 128KB shared memory
+                return [
+                    triton.Config({'BLOCK_M': BM, 'BLOCK_N': BN}, num_stages=s, num_warps=w) \
+                    for BM in [32, 64, 128]\
+                    for BN in [32, 64, 128]\
+                    for s in [2, 3, 4]\
+                    for w in [4, 8, 16]\
+                ]
+            elif "w7800" in device_name or "radeon pro" in device_name:
+                # W7800: Most conservative configs for 32KB shared memory
+                return [
+                    triton.Config({'BLOCK_M': BM, 'BLOCK_N': BN}, num_stages=s, num_warps=w) \
+                    for BM in [16, 32]\
+                    for BN in [16, 32]\
+                    for s in [1, 2]\
+                    for w in [2, 4]\
+                ]
+            else:
+                # MI210 and generic ROCm: Current optimized configs
+                return [
+                    triton.Config({'BLOCK_M': BM, 'BLOCK_N': BN}, num_stages=s, num_warps=w) \
+                    for BM in [32, 64]\
+                    for BN in [32, 64]\
+                    for s in [1, 2, 3]\
+                    for w in [2, 4]\
+                ]
+    except:
+        pass
+    
+    # Fallback: ROCm-optimized configs for MI210 (64KB shared memory limit)
+    return [
+        triton.Config({'BLOCK_M': BM, 'BLOCK_N': BN}, num_stages=s, num_warps=w) \
+        for BM in [32, 64]\
+        for BN in [32, 64]\
+        for s in [1, 2, 3]\
+        for w in [2, 4]\
+    ]
+
+# Get device-specific configurations
+configs = get_device_triton_configs()
 
 # ──────────────────────────── SPARSE ADDITION BEGIN ───────────────────────────
 @triton.autotune(configs, key=["N_CTX", "HEAD_DIM"])
@@ -391,12 +443,62 @@ def triton_block_sparse_attn_forward(q, k, v, q2k_index, q2k_num, variable_block
     B, H, T, D = q.shape
     sm_scale = 1.0 / math.sqrt(D)
     max_kv_blks = q2k_index.shape[-1]
-    assert T % 64 == 0, f"T must be a multiple of 64, but got {T}"
-    assert T // 64 == q2k_num.shape[-1], f"shape mismatch, T // 64 = {T // 64}, q2k_num.shape[-2] = {q2k_num.shape[-2]}"
+    # Calculate the actual block size based on the block map dimensions
+    num_blocks = q2k_num.shape[-1]
+    block_size = T // num_blocks
+    
+    # Device-specific block size handling
+    try:
+        import torch
+        if torch.cuda.is_available() and hasattr(torch.version, 'hip') and torch.version.hip is not None:
+            device_name = torch.cuda.get_device_name().lower()
+            
+            if "w7800" in device_name or "radeon pro" in device_name:
+                # W7800: Most conservative, force 16 or 32 element blocks
+                target_block_size = 16 if block_size <= 16 else 32
+            elif "mi250" in device_name or "m250" in device_name:
+                # MI250: Can handle larger blocks due to 128KB shared memory
+                if block_size <= 16:
+                    target_block_size = 16
+                elif block_size <= 32:
+                    target_block_size = 32
+                elif block_size <= 64:
+                    target_block_size = 64
+                else:
+                    target_block_size = 128
+            else:
+                # MI210, MI300X, generic: Support 32 and 64 element blocks
+                target_block_size = 32 if block_size <= 32 else 64
+        else:
+            # Non-ROCm: Use 32 as default
+            target_block_size = 32
+    except:
+        # Fallback: Use 32 as default
+        target_block_size = 32
+    
+    # Pad sequence to match target block size if needed
+    if block_size != target_block_size:
+        pad_length = target_block_size - (T % target_block_size) if T % target_block_size != 0 else 0
+        if pad_length > 0:
+            q = torch.nn.functional.pad(q, (0, 0, 0, pad_length), value=0)
+            k = torch.nn.functional.pad(k, (0, 0, 0, pad_length), value=0)
+            v = torch.nn.functional.pad(v, (0, 0, 0, pad_length), value=0)
+            T = q.shape[2]
+            num_blocks = T // target_block_size
+            # Update q2k_num to match the new number of blocks
+            q2k_num = torch.full((B, H, num_blocks), 1, device=q.device, dtype=torch.int32)
+            q2k_index = torch.zeros((B, H, num_blocks, 1), device=q.device, dtype=torch.int32)
+            for i in range(num_blocks):
+                q2k_index[:, :, i, 0] = i
+        block_size = target_block_size
+    
+    assert T % block_size == 0, f"T must be a multiple of {block_size}, but got {T}"
+    assert T // block_size == num_blocks, f"shape mismatch, T // {block_size} = {T // block_size}, q2k_num.shape[-1] = {num_blocks}"
+    
     o = torch.empty_like(q)
     M = torch.empty((B, H, T), dtype=torch.float32, device=q.device)
 
-    grid = lambda _: (triton.cdiv(T, 64), B * H, 1)
+    grid = lambda _: (triton.cdiv(T, block_size), B * H, 1)
     _attn_fwd_sparse[grid](
         q, k, v, sm_scale,
         q2k_index, q2k_num, max_kv_blks,
@@ -422,11 +524,37 @@ def triton_block_sparse_attn_backward(do, q, k, v, o, M, q2k_index, q2k_num, k2q
     dk = torch.empty_like(k)
     dv = torch.empty_like(v)
     BATCH, N_HEAD, N_CTX = q.shape[:3]
-    BLOCK_M1, BLOCK_N1, BLOCK_M2, BLOCK_N2 = 32, 64, 64, 32
+    
+    # Device-specific block sizes for backward pass
+    try:
+        import torch
+        if torch.cuda.is_available() and hasattr(torch.version, 'hip') and torch.version.hip is not None:
+            device_name = torch.cuda.get_device_name().lower()
+            
+            if "w7800" in device_name or "radeon pro" in device_name:
+                # W7800: Most conservative block sizes for 32KB shared memory
+                BLOCK_M1, BLOCK_N1, BLOCK_M2, BLOCK_N2 = 16, 16, 16, 16
+                PRE_BLOCK = 16
+            elif "mi250" in device_name or "m250" in device_name:
+                # MI250: Larger block sizes for 128KB shared memory
+                BLOCK_M1, BLOCK_N1, BLOCK_M2, BLOCK_N2 = 64, 64, 64, 64
+                PRE_BLOCK = 64
+            else:
+                # MI210, MI300X, generic: Current optimized block sizes
+                BLOCK_M1, BLOCK_N1, BLOCK_M2, BLOCK_N2 = 32, 32, 32, 32
+                PRE_BLOCK = 32
+        else:
+            # Non-ROCm: Use 32 as default
+            BLOCK_M1, BLOCK_N1, BLOCK_M2, BLOCK_N2 = 32, 32, 32, 32
+            PRE_BLOCK = 32
+    except:
+        # Fallback: ROCm-optimized block sizes for MI210 shared memory constraints
+        BLOCK_M1, BLOCK_N1, BLOCK_M2, BLOCK_N2 = 32, 32, 32, 32
+        PRE_BLOCK = 32
+    
     RCP_LN2 = 1.4426950408889634  # = 1.0 / ln(2)
     arg_k = k
     arg_k = arg_k * (sm_scale * RCP_LN2)
-    PRE_BLOCK = 64
     assert N_CTX % PRE_BLOCK == 0
     pre_grid = (N_CTX // PRE_BLOCK, BATCH * N_HEAD)
     delta = torch.empty_like(M)
