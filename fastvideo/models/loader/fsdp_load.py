@@ -148,21 +148,115 @@ def maybe_load_fsdp_model(
         # Simple loading path for non-FSDP models
         logger.info("Using simple model loading (non-FSDP)")
         from safetensors import safe_open
+        from fastvideo.models.loader.utils import get_param_names_mapping, hf_to_custom_state_dict
         
         # Load the first safetensors file
         if weight_dir_list:
             with safe_open(weight_dir_list[0], framework="pt", device="cpu") as f:
                 state_dict = {}
                 for key in f.keys():
-                    state_dict[key] = f.get_tensor(key)
+                    tensor = f.get_tensor(key)
+                    # NaN detection: Check weights immediately after loading from safetensors
+                    if torch.isnan(tensor).any():
+                        logger.error(f"NaN detected in weight '{key}' immediately after loading from safetensors. Shape: {tensor.shape}, NaNs: {torch.isnan(tensor).sum()}, dtype: {tensor.dtype}, stats: min={tensor.min()}, max={tensor.max()}, mean={tensor.mean()}")
+                        raise ValueError(f"NaN in weight '{key}' after loading from safetensors")
+                    state_dict[key] = tensor
+            
+            # Apply parameter name mapping (same as FSDP path)
+            if hasattr(model, 'param_names_mapping') and model.param_names_mapping:
+                param_names_mapping_fn = get_param_names_mapping(model.param_names_mapping)
+                # Convert HF state dict to custom format
+                def state_dict_iterator():
+                    for key, tensor in state_dict.items():
+                        yield (key, tensor)
+                state_dict, _ = hf_to_custom_state_dict(state_dict_iterator(), param_names_mapping_fn)
+                logger.info("Applied parameter name mapping for simple loading")
+                
+                # NaN detection: Check all weights before loading into model
+                for key, tensor in state_dict.items():
+                    if torch.isnan(tensor).any():
+                        logger.error(f"NaN detected in weight '{key}' before load_state_dict. Shape: {tensor.shape}, NaNs: {torch.isnan(tensor).sum()}")
+                        raise ValueError(f"NaN in weight '{key}' before load_state_dict")
                 
                 # Load the state dict directly with assign=True to handle meta device
                 model.load_state_dict(state_dict, strict=False, assign=True)
                 logger.info("Model loaded successfully using simple loading")
                 
-                # Move model to the target device using to_empty for meta tensors
-                model = model.to_empty(device=device)
-                logger.info(f"Model moved to device: {device}")
+                # NaN detection: Check weights after load_state_dict (skip meta tensors)
+                for name, param in model.named_parameters():
+                    if param.is_meta:
+                        continue  # Skip meta tensors
+                    if torch.isnan(param).any():
+                        logger.error(f"NaN detected in parameter '{name}' after load_state_dict. Shape: {param.shape}, NaNs: {torch.isnan(param).sum()}, dtype: {param.dtype}, device: {param.device}")
+                        raise ValueError(f"NaN in parameter '{name}' after load_state_dict")
+                
+                # Move model to the target device
+                # For ROCm, use to_empty() then explicitly reload weights to avoid NaN issues
+                from fastvideo.platforms import current_platform
+                if current_platform.device_name == "rocm":
+                    # Move state_dict weights to device first
+                    device_state_dict = {}
+                    for key, tensor in state_dict.items():
+                        device_tensor = tensor.to(device=device, dtype=default_dtype)
+                        # NaN detection: Check after moving to device
+                        if torch.isnan(device_tensor).any():
+                            logger.error(f"NaN detected in weight '{key}' after moving to device {device}. Shape: {device_tensor.shape}, NaNs: {torch.isnan(device_tensor).sum()}, dtype: {device_tensor.dtype}")
+                            raise ValueError(f"NaN in weight '{key}' after moving to device")
+                        device_state_dict[key] = device_tensor
+                    
+                    # Move model to device using to_empty (required for meta tensors)
+                    model = model.to_empty(device=device)
+                    # Reload weights on device
+                    missing_keys, unexpected_keys = model.load_state_dict(device_state_dict, strict=False, assign=True)
+                    logger.info(f"Model moved to device: {device} (ROCm path with explicit weight reload)")
+                    if missing_keys:
+                        logger.warning(f"Missing keys when loading state_dict (ROCm): {len(missing_keys)} keys")
+                        # Log first few missing keys
+                        for key in list(missing_keys)[:10]:
+                            logger.warning(f"  Missing: {key}")
+                    if unexpected_keys:
+                        logger.warning(f"Unexpected keys when loading state_dict (ROCm): {len(unexpected_keys)} keys")
+                        for key in list(unexpected_keys)[:10]:
+                            logger.warning(f"  Unexpected: {key}")
+                else:
+                    # Move model to the target device using to_empty for meta tensors
+                    model = model.to_empty(device=device)
+                    logger.info(f"Model moved to device: {device}")
+                
+                # NaN detection: Check weights after moving to device
+                # First check patch_embedding specifically as that's where we know NaNs occur
+                if hasattr(model, 'patch_embedding') and hasattr(model.patch_embedding, 'proj'):
+                    patch_weight = model.patch_embedding.proj.weight
+                    if torch.isnan(patch_weight).any():
+                        logger.error(f"NaN detected in patch_embedding.proj.weight after to_empty(device={device}). Shape: {patch_weight.shape}, NaNs: {torch.isnan(patch_weight).sum()}, dtype: {patch_weight.dtype}, device: {patch_weight.device}")
+                        # Check what was in state_dict
+                        patch_key = None
+                        for key in state_dict.keys():
+                            if 'patch_embedding' in key and 'weight' in key:
+                                patch_key = key
+                                break
+                        if patch_key:
+                            orig_tensor = state_dict[patch_key]
+                            logger.error(f"Original tensor from state_dict - Shape: {orig_tensor.shape}, dtype: {orig_tensor.dtype}, device: {orig_tensor.device}, NaNs: {torch.isnan(orig_tensor).sum()}")
+                        raise ValueError(f"NaN in patch_embedding.proj.weight after to_empty")
+                
+                # Then check all parameters (this might be slow but catches other issues)
+                nan_params = []
+                for name, param in model.named_parameters():
+                    if torch.isnan(param).any():
+                        nan_params.append((name, param.shape, torch.isnan(param).sum()))
+                
+                if nan_params:
+                    logger.error(f"NaN detected in {len(nan_params)} parameters after to_empty(device={device}):")
+                    for name, shape, nan_count in nan_params[:20]:  # Show first 20
+                        logger.error(f"  - {name}: shape={shape}, NaNs={nan_count}")
+                    if len(nan_params) > 20:
+                        logger.error(f"  ... and {len(nan_params) - 20} more parameters with NaNs")
+                    # Check if patch_embedding is in the list
+                    patch_nan = [n for n, _, _ in nan_params if 'patch_embedding' in n]
+                    if patch_nan:
+                        logger.error(f"CRITICAL: patch_embedding parameters with NaN: {patch_nan}")
+                    raise ValueError(f"NaN detected in {len(nan_params)} parameters after to_empty")
     for n, p in chain(model.named_parameters(), model.named_buffers()):
         if p.is_meta:
             raise RuntimeError(
