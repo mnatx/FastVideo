@@ -20,6 +20,7 @@ def main():
         prompt,
         return_frames=True,  # Also return frames from this call (defaults to False)
         output_path="my_videos/",  # Controls where videos are saved
+        height=256, width=256,
         save_video=True
     )
 

@@ -17,17 +17,114 @@ import triton.language as tl
 import math  # small utility needed by the sparse wrapper
 # ──────────────────────────── SPARSE ADDITION END ─────────────────────────────
 
+def get_rocm_gpu_type():
+    """
+    Detect the specific ROCm GPU type for shared memory optimization.
+    
+    Based on AMD GPU architecture specifications:
+    - MI210: 64KB shared memory per CU (CDNA1) - very conservative
+    - MI250: 128KB shared memory per CU (CDNA2) - can use more stages
+    - MI300X: 128KB shared memory per CU (CDNA3) - similar to MI250
+    - W7800: 64KB shared memory per CU (RDNA3) - conservative
+    
+    Returns: 'mi210', 'mi250', 'mi300x', 'w7800', or 'generic_rocm'
+    """
+    if not torch.cuda.is_available():
+        return None
+    
+    if not (hasattr(torch.version, 'hip') and torch.version.hip is not None):
+        return None
+    
+    try:
+        device_name = torch.cuda.get_device_name(0).lower()
+        if 'mi300x' in device_name or 'mi300' in device_name:
+            return 'mi300x'
+        elif 'mi250' in device_name:
+            return 'mi250'
+        elif 'mi210' in device_name:
+            return 'mi210'
+        elif 'w7800' in device_name or 'radeon pro w7800' in device_name:
+            return 'w7800'
+        else:
+            return 'generic_rocm'
+    except Exception:
+        return 'generic_rocm'
+
+# Detect GPU type for shared memory optimization
+gpu_type = get_rocm_gpu_type()
+is_rocm = gpu_type is not None
 
 # We don't run auto-tuning every time to keep the tutorial fast. Keeping
 # the code below and commenting out the equivalent parameters is convenient for
 # re-tuning.
-configs = [
-    triton.Config({'BLOCK_M': BM, 'BLOCK_N': BN}, num_stages=s, num_warps=w) \
-    for BM in [64]\
-    for BN in [64]\
-    for s in [3, 4, 7]\
-    for w in [4, 8]\
-]
+# Device-specific num_stages configuration based on shared memory limits:
+# - MI210: 64KB shared memory - very conservative (num_stages: [1, 2])
+# - MI250: 128KB shared memory - moderate (num_stages: [2, 3, 4])
+# - MI300X: 128KB shared memory - moderate (num_stages: [2, 3, 4])
+# - W7800: 64KB shared memory - conservative (num_stages: [1, 2, 3])
+# - Generic ROCm: Default conservative (num_stages: [1, 2, 3])
+# - CUDA: Higher limits (num_stages: [3, 4, 7])
+if is_rocm:
+    if gpu_type == 'mi210':
+        # MI210: 64KB shared memory - very conservative to avoid overflow
+        # Reference: AMD Instinct MI210 has 64KB shared memory per CU
+        configs = [
+            triton.Config({'BLOCK_M': BM, 'BLOCK_N': BN}, num_stages=s, num_warps=w) \
+            for BM in [64]\
+            for BN in [64]\
+            for s in [1, 2]\
+            for w in [4, 8]\
+        ]
+    elif gpu_type == 'mi250':
+        # MI250: 128KB shared memory - can use more stages
+        # Reference: AMD Instinct MI250 (CDNA2) has 128KB shared memory per CU
+        configs = [
+            triton.Config({'BLOCK_M': BM, 'BLOCK_N': BN}, num_stages=s, num_warps=w) \
+            for BM in [64]\
+            for BN in [64]\
+            for s in [2, 3, 4]\
+            for w in [4, 8]\
+        ]
+    elif gpu_type == 'mi300x':
+        # MI300X: 128KB shared memory - similar to MI250
+        # Reference: AMD Instinct MI300X (CDNA3) has 128KB shared memory per CU
+        configs = [
+            triton.Config({'BLOCK_M': BM, 'BLOCK_N': BN}, num_stages=s, num_warps=w) \
+            for BM in [64]\
+            for BN in [64]\
+            for s in [2, 3, 4]\
+            for w in [4, 8]\
+        ]
+    elif gpu_type == 'w7800':
+        # W7800: 64KB shared memory - conservative
+        # Reference: AMD Radeon PRO W7800 (RDNA3) has 64KB shared memory per CU
+        configs = [
+            triton.Config({'BLOCK_M': BM, 'BLOCK_N': BN}, num_stages=s, num_warps=w) \
+            for BM in [64]\
+            for BN in [64]\
+            for s in [1, 2, 3]\
+            for w in [4, 8]\
+        ]
+    else:
+        # Generic ROCm: Default to conservative configuration
+        # Assume 64KB shared memory limit for safety
+        configs = [
+            triton.Config({'BLOCK_M': BM, 'BLOCK_N': BN}, num_stages=s, num_warps=w) \
+            for BM in [64]\
+            for BN in [64]\
+            for s in [1, 2, 3]\
+            for w in [4, 8]\
+        ]
+else:
+    # CUDA GPUs can use higher num_stages
+    # Most CUDA GPUs have 48KB-164KB shared memory, with newer architectures supporting more
+    configs = [
+        triton.Config({'BLOCK_M': BM, 'BLOCK_N': BN}, num_stages=s, num_warps=w) \
+        for BM in [64]\
+        for BN in [64]\
+        for s in [3, 4, 7]\
+        for w in [4, 8]\
+    ]
 
 # ──────────────────────────── SPARSE ADDITION BEGIN ───────────────────────────
 @triton.autotune(configs, key=["N_CTX", "HEAD_DIM"])
