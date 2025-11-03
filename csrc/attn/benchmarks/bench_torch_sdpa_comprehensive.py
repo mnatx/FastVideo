@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Comprehensive VIDEO_SPARSE_ATTENTION (VSA) Benchmark for ROCm Platform
+Comprehensive TORCH_SDPA (Scaled Dot-Product Attention) Benchmark for ROCm Platform
 
 GPU-Specific Optimizations:
 - AMD Radeon PRO W7800: Conservative configurations optimized for 30GB memory
@@ -19,15 +19,6 @@ import json
 import numpy as np
 import random
 from typing import Tuple, List, Dict, Optional
-
-try:
-    import triton
-    TRITON_AVAILABLE = True
-except ImportError:
-    TRITON_AVAILABLE = False
-
-from vsa import block_sparse_attn
-from vsa import BLOCK_M, BLOCK_N
 
 def set_seed(seed: int = 42):
     random.seed(seed)
@@ -70,33 +61,37 @@ def get_peak_tflops(gpu_type: str) -> float:
 
 def validate_config_for_gpu(batch: int, head: int, seq_len: int, headdim: int, gpu_type: str) -> bool:
     """Validate if a configuration is appropriate for the detected GPU."""
-    # VSA uses block sparse attention, so memory usage is reduced by sparsity
-    # But we still need to validate based on total elements
-    total_elements = batch * head * seq_len * headdim
+    # Estimate memory usage (rough approximation)
+    # Q, K, V tensors: 3 * batch * head * seq_len * headdim * 2 bytes (bfloat16)
+    # Attention matrix: batch * head * seq_len * seq_len * 4 bytes (float32)
+    # Output: batch * head * seq_len * headdim * 2 bytes
+    tensor_memory = 3 * batch * head * seq_len * headdim * 2
+    attn_memory = batch * head * seq_len * seq_len * 4
+    output_memory = batch * head * seq_len * headdim * 2
+    total_memory_bytes = tensor_memory + attn_memory + output_memory
+    
+    # Convert to GB
+    total_memory_gb = total_memory_bytes / (1024**3)
     
     if gpu_type == "mi300x":
         # MI300X can handle extremely large configurations with 192GB memory
-        return total_elements <= 100000000  # 100M elements
+        return total_memory_gb <= 50.0  # Conservative limit
     elif gpu_type == "mi250":
-        # MI250 can handle very large configurations
-        return total_elements <= 50000000  # 50M elements
+        # MI250 can handle very large configurations with 128GB memory
+        return total_memory_gb <= 30.0
     elif gpu_type == "mi210":
-        # MI210 has limited shared memory (64KB vs 128KB on MI250)
-        # Conservative limits to avoid shared memory errors
-        # Also restrict head_dim to 64 to avoid shared memory issues
-        if headdim > 64:
-            return False
-        return total_elements <= 2000000   # 2M elements (slightly more permissive)
+        # MI210 has 64GB memory
+        return total_memory_gb <= 10.0
     elif gpu_type == "w7800":
-        # W7800 has more conservative limits
-        return total_elements <= 5000000   # 5M elements
+        # W7800 has 30GB memory
+        return total_memory_gb <= 8.0
     else:
         # Generic ROCm - balanced approach
-        return total_elements <= 10000000  # 10M elements
+        return total_memory_gb <= 15.0
 
-def generate_fastwan_configs(gpu_type: str, quick: bool = False) -> List[Tuple[int, int, int, int, int]]:
+def generate_fastwan_configs(gpu_type: str, quick: bool = False) -> List[Tuple[int, int, int, int, bool, float]]:
     """
-    Generate realistic configurations for FastWan2.1-T2V-1.3B-Diffusers with VSA.
+    Generate realistic configurations for FastWan2.1-T2V-1.3B-Diffusers.
     
     Model architecture:
     - num_attention_heads: 40
@@ -116,7 +111,6 @@ def generate_fastwan_configs(gpu_type: str, quick: bool = False) -> List[Tuple[i
     - VAE compression reducing spatial dimensions
     
     We'll benchmark realistic sequence lengths that represent actual usage.
-    Note: Sequence lengths must be divisible by BLOCK_M (64).
     """
     configs = []
     
@@ -127,7 +121,6 @@ def generate_fastwan_configs(gpu_type: str, quick: bool = False) -> List[Tuple[i
     # Realistic sequence lengths for video generation
     # These represent compressed/processed video tokens after VAE encoding
     # Actual sequence lengths depend on VAE compression ratio and patch size
-    # Must be divisible by BLOCK_M (64)
     realistic_seq_lens = [
         # Small configurations (short videos or compressed)
         1024, 2048, 4096, 8192,
@@ -137,111 +130,85 @@ def generate_fastwan_configs(gpu_type: str, quick: bool = False) -> List[Tuple[i
         131072, 262144,
     ]
     
-    # Filter to ensure divisibility by BLOCK_M
-    realistic_seq_lens = [s for s in realistic_seq_lens if s % BLOCK_M == 0]
-    
-    # Typical topk values for VSA (controls sparsity)
-    # Higher topk = lower sparsity, more computation
-    typical_topk_values = [1, 2, 4, 8, 16]
-    
     if gpu_type == "mi300x":
         # MI300X can handle the full FastWan configurations
         if quick:
             configs = [
                 # Quick test: FastWan architecture with moderate sequence lengths
-                (1, fastwan_heads, 16384, fastwan_head_dim, 4),
-                (1, fastwan_heads, 32768, fastwan_head_dim, 8),
-                (1, fastwan_heads, 65536, fastwan_head_dim, 16),
+                (1, fastwan_heads, 16384, fastwan_head_dim, False, 0.0),
+                (1, fastwan_heads, 32768, fastwan_head_dim, False, 0.0),
+                (1, fastwan_heads, 65536, fastwan_head_dim, True, 0.0),
             ]
         else:
-            # FastWan standard configurations with various topk values
+            # FastWan standard configurations
             for seq_len in realistic_seq_lens[:6]:  # Up to 65536
-                num_kv_blocks = seq_len // BLOCK_N
-                for topk in typical_topk_values:
-                    if topk <= num_kv_blocks:
-                        configs.append((1, fastwan_heads, seq_len, fastwan_head_dim, topk))
+                configs.append((1, fastwan_heads, seq_len, fastwan_head_dim, False, 0.0))
+                configs.append((1, fastwan_heads, seq_len, fastwan_head_dim, True, 0.0))
             
             # Batch size variations
             for batch in [1, 2]:
-                configs.append((batch, fastwan_heads, 32768, fastwan_head_dim, 8))
+                configs.append((batch, fastwan_heads, 32768, fastwan_head_dim, False, 0.0))
     
     elif gpu_type == "mi250":
         # MI250 configurations for FastWan
         if quick:
             configs = [
-                (1, fastwan_heads, 8192, fastwan_head_dim, 4),
-                (1, fastwan_heads, 16384, fastwan_head_dim, 8),
-                (1, fastwan_heads, 32768, fastwan_head_dim, 16),
+                (1, fastwan_heads, 8192, fastwan_head_dim, False, 0.0),
+                (1, fastwan_heads, 16384, fastwan_head_dim, False, 0.0),
+                (1, fastwan_heads, 32768, fastwan_head_dim, True, 0.0),
             ]
         else:
             for seq_len in realistic_seq_lens[:5]:  # Up to 32768
-                num_kv_blocks = seq_len // BLOCK_N
-                for topk in typical_topk_values[:4]:  # Up to topk=8
-                    if topk <= num_kv_blocks:
-                        configs.append((1, fastwan_heads, seq_len, fastwan_head_dim, topk))
+                configs.append((1, fastwan_heads, seq_len, fastwan_head_dim, False, 0.0))
+                configs.append((1, fastwan_heads, seq_len, fastwan_head_dim, True, 0.0))
             
-            configs.append((1, fastwan_heads, 32768, fastwan_head_dim, 8))
+            configs.append((1, fastwan_heads, 32768, fastwan_head_dim, False, 0.0))
     
     elif gpu_type == "mi210":
         # MI210 configurations for FastWan
-        # Note: MI210 has limited shared memory, head_dim=128 might be challenging
-        # But we'll include it for completeness
         if quick:
             configs = [
-                (1, fastwan_heads, 4096, fastwan_head_dim, 4),
-                (1, fastwan_heads, 8192, fastwan_head_dim, 8),
-                (1, fastwan_heads, 16384, fastwan_head_dim, 16),
+                (1, fastwan_heads, 4096, fastwan_head_dim, False, 0.0),
+                (1, fastwan_heads, 8192, fastwan_head_dim, False, 0.0),
+                (1, fastwan_heads, 16384, fastwan_head_dim, True, 0.0),
             ]
         else:
             for seq_len in realistic_seq_lens[:4]:  # Up to 16384
-                num_kv_blocks = seq_len // BLOCK_N
-                for topk in typical_topk_values[:4]:  # Up to topk=8
-                    if topk <= num_kv_blocks:
-                        configs.append((1, fastwan_heads, seq_len, fastwan_head_dim, topk))
+                configs.append((1, fastwan_heads, seq_len, fastwan_head_dim, False, 0.0))
+                configs.append((1, fastwan_heads, seq_len, fastwan_head_dim, True, 0.0))
     
     elif gpu_type == "w7800":
         # W7800 configurations for FastWan
         if quick:
             configs = [
-                (1, fastwan_heads, 4096, fastwan_head_dim, 4),
-                (1, fastwan_heads, 8192, fastwan_head_dim, 8),
-                (1, fastwan_heads, 16384, fastwan_head_dim, 16),
+                (1, fastwan_heads, 4096, fastwan_head_dim, False, 0.0),
+                (1, fastwan_heads, 8192, fastwan_head_dim, False, 0.0),
+                (1, fastwan_heads, 16384, fastwan_head_dim, True, 0.0),
             ]
         else:
             for seq_len in realistic_seq_lens[:4]:  # Up to 16384
-                num_kv_blocks = seq_len // BLOCK_N
-                for topk in typical_topk_values[:4]:  # Up to topk=8
-                    if topk <= num_kv_blocks:
-                        configs.append((1, fastwan_heads, seq_len, fastwan_head_dim, topk))
+                configs.append((1, fastwan_heads, seq_len, fastwan_head_dim, False, 0.0))
+                configs.append((1, fastwan_heads, seq_len, fastwan_head_dim, True, 0.0))
     
     else:
         # Generic ROCm configurations for FastWan
         if quick:
             configs = [
-                (1, fastwan_heads, 4096, fastwan_head_dim, 4),
-                (1, fastwan_heads, 8192, fastwan_head_dim, 8),
-                (1, fastwan_heads, 16384, fastwan_head_dim, 16),
+                (1, fastwan_heads, 4096, fastwan_head_dim, False, 0.0),
+                (1, fastwan_heads, 8192, fastwan_head_dim, False, 0.0),
+                (1, fastwan_heads, 16384, fastwan_head_dim, True, 0.0),
             ]
         else:
             for seq_len in realistic_seq_lens[:4]:  # Up to 16384
-                num_kv_blocks = seq_len // BLOCK_N
-                for topk in typical_topk_values[:4]:  # Up to topk=8
-                    if topk <= num_kv_blocks:
-                        configs.append((1, fastwan_heads, seq_len, fastwan_head_dim, topk))
+                configs.append((1, fastwan_heads, seq_len, fastwan_head_dim, False, 0.0))
+                configs.append((1, fastwan_heads, seq_len, fastwan_head_dim, True, 0.0))
     
     return configs
 
-def generate_gpu_specific_configs(gpu_type: str, quick: bool = False) -> List[Tuple[int, int, int, int, int]]:
+def generate_gpu_specific_configs(gpu_type: str, quick: bool = False) -> List[Tuple[int, int, int, int, bool, float]]:
     """
     Generate configurations appropriate for the detected GPU type.
-    Returns list of (batch, heads, seq_len, head_dim, topk) tuples.
-    
-    VSA Parameters:
-    - batch: Batch size
-    - heads: Number of attention heads
-    - seq_len: Sequence length (must be divisible by BLOCK_M)
-    - head_dim: Head dimension
-    - topk: Number of top-k blocks to attend to (controls sparsity)
+    Returns list of (batch, heads, seq_len, head_dim, causal, dropout) tuples.
     """
     configs = []
     
@@ -254,160 +221,137 @@ def generate_gpu_specific_configs(gpu_type: str, quick: bool = False) -> List[Tu
         if quick:
             configs = [
                 # Quick test configurations for MI300X
-                (1, 32, 4096, 64, 4),
-                (2, 32, 8192, 64, 8),
-                (1, 32, 16384, 64, 16),
+                (1, 32, 4096, 64, False, 0.0),
+                (2, 32, 8192, 64, False, 0.0),
+                (1, 32, 16384, 64, True, 0.0),
             ]
         else:
-            # Different sequence lengths with various topk values
+            # Different sequence lengths
             for seq_len in [2048, 4096, 8192, 16384, 32768, 65536]:
-                for topk in [1, 2, 4, 8, 16]:
-                    if seq_len >= topk * BLOCK_N:  # Ensure topk doesn't exceed available blocks
-                        configs.append((1, 32, seq_len, 64, topk))
-            
-            # Ultra-long sequences with high sparsity
-            for seq_len in [131072]:
-                for topk in [1, 2, 4]:
-                    configs.append((1, 32, seq_len, 64, topk))
+                for causal in [False, True]:
+                    for dropout in [0.0, 0.1]:
+                        configs.append((1, 32, seq_len, 64, causal, dropout))
             
             # Different head counts
             for num_heads in [16, 24, 32, 48, 64]:
-                configs.append((1, num_heads, 16384, 64, 8))
+                configs.append((1, num_heads, 16384, 64, False, 0.0))
             
             # Different head dimensions
             for head_dim in [64, 128, 256]:
-                configs.append((1, 32, 16384, head_dim, 8))
+                configs.append((1, 32, 16384, head_dim, False, 0.0))
             
             # Larger batch sizes
             for batch in [1, 2, 4, 8]:
-                configs.append((batch, 32, 16384, 64, 8))
-            
-            # High sparsity configurations (topk=1)
-            configs.append((1, 32, 32768, 64, 1))
-            configs.append((1, 32, 65536, 64, 1))
-            configs.append((1, 64, 16384, 64, 1))
+                configs.append((batch, 32, 16384, 64, False, 0.0))
     
     elif gpu_type == "mi250":
         # MI250 configurations - aggressive parameters for 128GB memory
         if quick:
             configs = [
                 # Quick test configurations for MI250
-                (1, 16, 2048, 64, 2),
-                (2, 24, 4096, 64, 4),
-                (1, 32, 8192, 64, 8),
+                (1, 16, 2048, 64, False, 0.0),
+                (2, 24, 4096, 64, False, 0.0),
+                (1, 32, 8192, 64, True, 0.0),
             ]
         else:
-            # Different sequence lengths with various topk values
+            # Different sequence lengths
             for seq_len in [1024, 2048, 4096, 8192, 16384, 32768]:
-                for topk in [1, 2, 4, 8]:
-                    if seq_len >= topk * BLOCK_N:
-                        configs.append((1, 16, seq_len, 64, topk))
+                for causal in [False, True]:
+                    configs.append((1, 16, seq_len, 64, causal, 0.0))
             
             # Different head counts
             for num_heads in [8, 16, 24, 32]:
-                configs.append((1, num_heads, 8192, 64, 4))
+                configs.append((1, num_heads, 8192, 64, False, 0.0))
             
             # Different head dimensions
             for head_dim in [64, 128, 256]:
-                configs.append((1, 16, 8192, head_dim, 4))
+                configs.append((1, 16, 8192, head_dim, False, 0.0))
             
-            # Larger batch sizes
+            # Batch sizes
             for batch in [1, 2, 4]:
-                configs.append((batch, 16, 8192, 64, 4))
-            
-            # High sparsity configurations
-            configs.append((1, 16, 16384, 64, 1))
-            configs.append((1, 32, 8192, 64, 1))
+                configs.append((batch, 16, 8192, 64, False, 0.0))
     
     elif gpu_type == "mi210":
-        # MI210 configurations - very conservative for shared memory limitations
-        # MI210 has limited shared memory (64KB vs 128KB on MI250)
+        # MI210 configurations - conservative for 64GB memory
         if quick:
             configs = [
                 # Quick test configurations for MI210
-                (1, 4, 512, 64, 2),
-                (1, 8, 1024, 64, 4),
-                (1, 8, 2048, 64, 8),
+                (1, 8, 1024, 64, False, 0.0),
+                (1, 12, 2048, 64, False, 0.0),
+                (1, 16, 4096, 64, True, 0.0),
             ]
         else:
-            # Very conservative configurations for MI210
-            for seq_len in [512, 1024, 1536, 2048]:
-                for topk in [1, 2, 4, 8]:
-                    if seq_len >= topk * BLOCK_N:
-                        configs.append((1, 8, seq_len, 64, topk))
-                        configs.append((1, 4, seq_len, 64, topk))
+            # Different sequence lengths
+            for seq_len in [512, 1024, 2048, 4096, 8192]:
+                for causal in [False, True]:
+                    configs.append((1, 12, seq_len, 64, causal, 0.0))
             
-            # Different head counts (restricted to head_dim=64)
-            for num_heads in [2, 4, 6, 8, 12]:
-                configs.append((1, num_heads, 1024, 64, 4))
+            # Different head counts
+            for num_heads in [4, 8, 12, 16, 24]:
+                configs.append((1, num_heads, 2048, 64, False, 0.0))
             
-            # Small batch sizes
+            # Different head dimensions
+            for head_dim in [64, 128]:
+                configs.append((1, 12, 2048, head_dim, False, 0.0))
+            
+            # Batch sizes
             for batch in [1, 2]:
-                configs.append((batch, 4, 1024, 64, 4))
+                configs.append((batch, 12, 2048, 64, False, 0.0))
     
     elif gpu_type == "w7800":
         # W7800 configurations - conservative parameters for 30GB memory
         if quick:
             configs = [
                 # Quick test configurations for W7800
-                (1, 8, 1024, 64, 2),
-                (1, 12, 2048, 64, 4),
-                (1, 12, 4096, 64, 8),
+                (1, 8, 1024, 64, False, 0.0),
+                (1, 12, 2048, 64, False, 0.0),
+                (1, 16, 4096, 64, True, 0.0),
             ]
         else:
-            # Conservative configurations for W7800
+            # Different sequence lengths
             for seq_len in [512, 1024, 2048, 4096, 8192]:
-                for topk in [1, 2, 4, 8]:
-                    if seq_len >= topk * BLOCK_N:
-                        configs.append((1, 12, seq_len, 64, topk))
+                for causal in [False, True]:
+                    configs.append((1, 12, seq_len, 64, causal, 0.0))
             
             # Different head counts
             for num_heads in [4, 8, 12, 16]:
-                configs.append((1, num_heads, 4096, 64, 4))
+                configs.append((1, num_heads, 4096, 64, False, 0.0))
             
             # Different head dimensions
             for head_dim in [64, 128]:
-                configs.append((1, 12, 4096, head_dim, 4))
+                configs.append((1, 12, 4096, head_dim, False, 0.0))
             
-            # Small batch sizes
+            # Batch sizes
             for batch in [1, 2]:
-                configs.append((batch, 12, 4096, 64, 4))
+                configs.append((batch, 12, 4096, 64, False, 0.0))
     
     else:
         # Generic ROCm configurations - balanced approach
         if quick:
             configs = [
                 # Quick test configurations for generic ROCm
-                (1, 12, 1024, 64, 2),
-                (1, 12, 2048, 64, 4),
-                (1, 12, 4096, 64, 8),
+                (1, 12, 1024, 64, False, 0.0),
+                (1, 12, 2048, 64, False, 0.0),
+                (1, 12, 4096, 64, True, 0.0),
             ]
         else:
-            # Balanced configurations for generic ROCm
+            # Different sequence lengths
             for seq_len in [512, 1024, 2048, 4096, 8192]:
-                for topk in [1, 2, 4, 8]:
-                    if seq_len >= topk * BLOCK_N:
-                        configs.append((1, 12, seq_len, 64, topk))
+                for causal in [False, True]:
+                    configs.append((1, 12, seq_len, 64, causal, 0.0))
             
             # Different head counts
             for num_heads in [4, 8, 12, 16]:
-                configs.append((1, num_heads, 4096, 64, 4))
+                configs.append((1, num_heads, 4096, 64, False, 0.0))
             
             # Different head dimensions
             for head_dim in [64, 128]:
-                configs.append((1, 12, 4096, head_dim, 4))
+                configs.append((1, 12, 4096, head_dim, False, 0.0))
     
-    # Filter configurations based on GPU memory limits and ensure seq_len is divisible by BLOCK_M
+    # Filter configurations based on GPU memory limits
     validated_configs = []
     for config in configs:
-        batch, head, seq_len, headdim, topk = config
-        # Ensure sequence length is divisible by BLOCK_M
-        if seq_len % BLOCK_M != 0:
-            continue
-        # Ensure topk doesn't exceed available blocks
-        num_kv_blocks = seq_len // BLOCK_N
-        if topk > num_kv_blocks:
-            continue
+        batch, head, seq_len, headdim, causal, dropout = config
         if validate_config_for_gpu(batch, head, seq_len, headdim, gpu_type):
             validated_configs.append(config)
         else:
@@ -417,103 +361,75 @@ def generate_gpu_specific_configs(gpu_type: str, quick: bool = False) -> List[Tu
 
 def create_input_tensors(batch: int, head: int, seq_len: int, headdim: int, device: str = "cuda"):
     """Create random input tensors for attention."""
-    # VSA expects format: (batch, head, seq_len, headdim)
+    # Format expected by torch.nn.functional.scaled_dot_product_attention:
+    # (batch, head, seq_len, headdim)
     q = torch.randn(batch, head, seq_len, headdim, dtype=torch.bfloat16, device=device)
     k = torch.randn(batch, head, seq_len, headdim, dtype=torch.bfloat16, device=device)
     v = torch.randn(batch, head, seq_len, headdim, dtype=torch.bfloat16, device=device)
     return q, k, v
 
-def create_block_map_and_sizes(batch: int, head: int, seq_len: int, topk: int, device: str = "cuda"):
-    """Create block map and variable block sizes for VSA."""
-    num_q_blocks = seq_len // BLOCK_M
-    num_kv_blocks = seq_len // BLOCK_N
-    
-    # Create random block map
-    block_map = torch.zeros(batch, head, num_q_blocks, num_kv_blocks, dtype=torch.bool, device=device)
-    
-    # For each batch and head, create sparse pattern
-    for b in range(batch):
-        for h in range(head):
-            scores = torch.rand(num_q_blocks, num_kv_blocks, device=device)
-            _, topk_indices = torch.topk(scores, min(topk, num_kv_blocks), dim=-1)
-            for q_idx in range(num_q_blocks):
-                kv_indices = topk_indices[q_idx]
-                block_map[b, h, q_idx, kv_indices] = True
-    
-    variable_block_sizes = torch.full((num_kv_blocks,), BLOCK_N, dtype=torch.int32, device=device)
-    return block_map, variable_block_sizes
-
-def calculate_vsa_flops(batch: int, head: int, seq_len: int, headdim: int, topk: int) -> int:
+def calculate_attention_flops(batch: int, head: int, seq_len: int, headdim: int, causal: bool = False) -> int:
     """
-    Calculate FLOPs for VSA block sparse attention.
+    Calculate FLOPs for scaled dot-product attention.
     
-    VSA only computes attention for selected blocks:
-    - Number of Q blocks: seq_len / BLOCK_M
-    - Number of KV blocks per Q block: topk
-    - FLOPs per block: BLOCK_M * BLOCK_N * headdim (for QK^T) + BLOCK_M * BLOCK_N * headdim (for AV)
-    - Plus softmax overhead
+    Forward pass:
+    - QK^T: batch * head * seq_len * seq_len * headdim (multiply-add)
+    - Softmax: batch * head * seq_len * seq_len (approximate, expensive)
+    - Attention * V: batch * head * seq_len * seq_len * headdim (multiply-add)
     
-    Total forward: ~2 * batch * head * (seq_len / BLOCK_M) * topk * BLOCK_M * BLOCK_N * headdim
-    Simplified: ~2 * batch * head * seq_len * topk * BLOCK_N * headdim
+    Total forward: ~2 * batch * head * seq_len^2 * headdim (QK^T and AV)
+    Plus softmax: ~batch * head * seq_len^2 operations
+    
+    For causal attention, we compute only lower triangular, so:
+    - FLOPs ≈ batch * head * seq_len * (seq_len + 1) / 2 * headdim
+    
+    Conservative estimate: 4 * batch * head * seq_len^2 * headdim (includes softmax overhead)
     """
-    num_q_blocks = seq_len // BLOCK_M
-    flops_per_block = 2 * BLOCK_M * BLOCK_N * headdim  # QK^T and AV
-    total_flops = batch * head * num_q_blocks * topk * flops_per_block
-    # Add softmax overhead (approximate)
-    total_flops += batch * head * num_q_blocks * topk * BLOCK_M * BLOCK_N
-    return int(total_flops)
-
-def calculate_sparsity(seq_len: int, topk: int) -> float:
-    """Calculate sparsity percentage based on topk and block sizes."""
-    num_q_blocks = seq_len // BLOCK_M
-    num_kv_blocks = seq_len // BLOCK_N
-    total_blocks = num_q_blocks * num_kv_blocks
-    active_blocks = num_q_blocks * topk
-    sparsity = 1.0 - (active_blocks / total_blocks)
-    return sparsity
+    if causal:
+        # Causal attention: only compute lower triangular matrix
+        # Approximate: seq_len * (seq_len + 1) / 2 elements
+        effective_elements = seq_len * (seq_len + 1) / 2
+        flops = 4 * batch * head * effective_elements * headdim
+    else:
+        # Full attention: seq_len^2 elements
+        flops = 4 * batch * head * seq_len * seq_len * headdim
+    
+    return int(flops)
 
 def benchmark_configuration(
     batch: int,
     head: int,
     seq_len: int,
     headdim: int,
-    topk: int,
+    causal: bool,
+    dropout: float,
     num_runs: int = 5
 ) -> Dict:
     """Benchmark a specific configuration."""
-    print(f"Benchmarking: batch={batch}, heads={head}, seq_len={seq_len}, head_dim={headdim}, topk={topk}")
+    print(f"Benchmarking: batch={batch}, heads={head}, seq_len={seq_len}, head_dim={headdim}, "
+          f"causal={causal}, dropout={dropout}")
     
     # Create tensors
     q, k, v = create_input_tensors(batch, head, seq_len, headdim)
-    block_map, variable_block_sizes = create_block_map_and_sizes(batch, head, seq_len, topk)
     
     # Calculate theoretical FLOPs
-    forward_flops = calculate_vsa_flops(batch, head, seq_len, headdim, topk)
+    forward_flops = calculate_attention_flops(batch, head, seq_len, headdim, causal)
     # Backward pass is approximately 2.5x forward FLOPs
     total_flops = forward_flops + int(2.5 * forward_flops)
     
-    # Calculate sparsity
-    sparsity = calculate_sparsity(seq_len, topk)
-    
-    # Warm-up phase to account for Triton compiler and runtime overheads
-    # Triton kernels are compiled on first use, which can take significant time.
-    # Multiple warmup iterations ensure:
-    # 1. Kernel compilation completes
-    # 2. Autotuning (if enabled) completes
-    # 3. GPU warms up to stable performance
-    # 4. CUDA driver optimizations are applied
-    warmup_iterations = 25  # Increased from 3 to account for Triton overhead
-    for i in range(warmup_iterations):
+    # Warm-up
+    for _ in range(3):
         q_fwd = q.clone().requires_grad_(True)
         k_fwd = k.clone().requires_grad_(True)
         v_fwd = v.clone().requires_grad_(True)
-        o, M = block_sparse_attn(q_fwd, k_fwd, v_fwd, block_map, variable_block_sizes)
-        grad_output = torch.randn_like(o)
-        o.backward(grad_output)
-        # Synchronize every few iterations to ensure kernels complete
-        if i % 5 == 0:
-            torch.cuda.synchronize()
-    # Final synchronization to ensure all warmup completes before timing
+        output = torch.nn.functional.scaled_dot_product_attention(
+            q_fwd, k_fwd, v_fwd,
+            is_causal=causal,
+            dropout_p=dropout,
+            scale=1.0 / np.sqrt(headdim)
+        )
+        grad_output = torch.randn_like(output)
+        output.backward(grad_output)
     torch.cuda.synchronize()
     
     # Benchmark
@@ -523,9 +439,14 @@ def benchmark_configuration(
         q_fwd = q.clone().requires_grad_(True)
         k_fwd = k.clone().requires_grad_(True)
         v_fwd = v.clone().requires_grad_(True)
-        o, M = block_sparse_attn(q_fwd, k_fwd, v_fwd, block_map, variable_block_sizes)
-        grad_output = torch.randn_like(o)
-        o.backward(grad_output)
+        output = torch.nn.functional.scaled_dot_product_attention(
+            q_fwd, k_fwd, v_fwd,
+            is_causal=causal,
+            dropout_p=dropout,
+            scale=1.0 / np.sqrt(headdim)
+        )
+        grad_output = torch.randn_like(output)
+        output.backward(grad_output)
         torch.cuda.synchronize()
         end_time = time.time()
         times.append(end_time - start_time)
@@ -541,10 +462,8 @@ def benchmark_configuration(
         'heads': head,
         'seq_len': seq_len,
         'head_dim': headdim,
-        'topk': topk,
-        'sparsity': sparsity,
-        'block_m': BLOCK_M,
-        'block_n': BLOCK_N,
+        'causal': causal,
+        'dropout': dropout,
         'avg_time_ms': avg_time * 1000,
         'std_time_ms': std_time * 1000,
         'tflops': tflops,
@@ -553,8 +472,8 @@ def benchmark_configuration(
     }
 
 def main():
-    parser = argparse.ArgumentParser(description='Comprehensive VSA Benchmark for ROCm')
-    parser.add_argument('--output', type=str, default='vsa_benchmark_results.json',
+    parser = argparse.ArgumentParser(description='Comprehensive TORCH_SDPA Benchmark for ROCm')
+    parser.add_argument('--output', type=str, default='torch_sdpa_benchmark_results.json',
                        help='Output file for results')
     parser.add_argument('--quick', action='store_true',
                        help='Run quick benchmark with fewer configurations')
@@ -568,7 +487,7 @@ def main():
     
     set_seed(42)
     
-    print("VIDEO_SPARSE_ATTENTION Comprehensive Benchmark for ROCm")
+    print("TORCH_SDPA Comprehensive Benchmark for ROCm")
     print("=" * 60)
     
     # Detect GPU type
@@ -582,9 +501,6 @@ def main():
     print(f"GPU Type: {gpu_type.upper()}")
     print(f"ROCm Version: {torch.version.hip}")
     print(f"PyTorch Version: {torch.__version__}")
-    if TRITON_AVAILABLE:
-        print(f"Triton Version: {triton.__version__}")
-    print(f"VSA Block Sizes: BLOCK_M={BLOCK_M}, BLOCK_N={BLOCK_N}")
     
     # Get peak TFLOPS
     peak_tflops = get_peak_tflops(gpu_type)
@@ -596,7 +512,7 @@ def main():
     elif gpu_type == "mi250":
         print("✅ Using MI250-optimized configurations (128GB memory, aggressive parameters)")
     elif gpu_type == "mi210":
-        print("✅ Using MI210-optimized configurations (64KB shared memory, very conservative parameters)")
+        print("✅ Using MI210-optimized configurations (64GB memory, conservative parameters)")
     elif gpu_type == "w7800":
         print("✅ Using W7800-optimized configurations (30GB memory, conservative parameters)")
     else:
@@ -615,14 +531,14 @@ def main():
     
     results = []
     
-    for i, (batch, head, seq_len, headdim, topk) in enumerate(configs):
+    for i, (batch, head, seq_len, headdim, causal, dropout) in enumerate(configs):
         try:
-            result = benchmark_configuration(batch, head, seq_len, headdim, topk, args.num_runs)
+            result = benchmark_configuration(batch, head, seq_len, headdim, causal, dropout, args.num_runs)
             result['peak_tflops'] = peak_tflops
             result['relative_performance'] = result['tflops'] / peak_tflops * 100.0  # Percentage of peak
             results.append(result)
             print(f"✓ [{i+1:2d}/{len(configs)}] {result['tflops']:.2f} TFLOPS "
-                  f"({result['relative_performance']:.1f}% of peak, sparsity: {result['sparsity']:.1%})")
+                  f"({result['relative_performance']:.1f}% of peak)")
         except Exception as e:
             print(f"✗ [{i+1:2d}/{len(configs)}] Failed: {e}")
             import traceback
@@ -648,8 +564,8 @@ def main():
         print(f"Best performance: {results[0]['tflops']:.2f} TFLOPS "
               f"({results[0]['relative_performance']:.1f}% of peak)")
         print(f"  - Config: batch={results[0]['batch']}, heads={results[0]['heads']}, "
-              f"seq_len={results[0]['seq_len']}, head_dim={results[0]['head_dim']}, topk={results[0]['topk']}")
-        print(f"  - Sparsity: {results[0]['sparsity']:.1%}")
+              f"seq_len={results[0]['seq_len']}, head_dim={results[0]['head_dim']}, "
+              f"causal={results[0]['causal']}, dropout={results[0]['dropout']}")
         
         # Show configuration ranges used
         if results:
@@ -657,15 +573,16 @@ def main():
             num_heads = sorted(set(r['heads'] for r in results))
             seq_lens = sorted(set(r['seq_len'] for r in results))
             head_dims = sorted(set(r['head_dim'] for r in results))
-            topk_vals = sorted(set(r['topk'] for r in results))
+            causal_modes = sorted(set(r['causal'] for r in results))
+            dropout_vals = sorted(set(r['dropout'] for r in results))
             
             print(f"\nConfiguration ranges tested:")
             print(f"  Batch sizes: {batch_sizes}")
             print(f"  Number of heads: {num_heads}")
             print(f"  Sequence lengths: {seq_lens}")
             print(f"  Head dimensions: {head_dims}")
-            print(f"  Top-k values: {topk_vals}")
-            print(f"  Block sizes: BLOCK_M={BLOCK_M}, BLOCK_N={BLOCK_N}")
+            print(f"  Causal modes: {causal_modes}")
+            print(f"  Dropout values: {dropout_vals}")
         
         # Performance by sequence length
         print("\nPerformance by sequence length:")
@@ -682,37 +599,18 @@ def main():
             print(f"  {seq_len:6d}: {max(perfs):8.2f} TFLOPS (max), {np.mean(perfs):8.2f} TFLOPS (avg), "
                   f"{avg_rel:.1f}% of peak (avg)")
         
-        # Performance by sparsity
-        print("\nPerformance by sparsity level:")
-        sparsity_perf = {}
-        for r in results:
-            sparsity_range = f"{int(r['sparsity']*100)//10*10}-{int(r['sparsity']*100)//10*10+9}%"
-            if sparsity_range not in sparsity_perf:
-                sparsity_perf[sparsity_range] = []
-            sparsity_perf[sparsity_range].append(r['tflops'])
-        
-        for sparsity_range in sorted(sparsity_perf.keys()):
-            perfs = sparsity_perf[sparsity_range]
-            avg_rel = np.mean([r['relative_performance'] for r in results 
-                              if f"{int(r['sparsity']*100)//10*10}-{int(r['sparsity']*100)//10*10+9}%" == sparsity_range])
-            print(f"  {sparsity_range:>8}: {max(perfs):8.2f} TFLOPS (max), {np.mean(perfs):8.2f} TFLOPS (avg), "
-                  f"{avg_rel:.1f}% of peak (avg)")
-        
-        # Performance by topk
-        print("\nPerformance by topk value:")
-        topk_perf = {}
-        for r in results:
-            topk_val = r['topk']
-            if topk_val not in topk_perf:
-                topk_perf[topk_val] = []
-            topk_perf[topk_val].append(r['tflops'])
-        
-        for topk_val in sorted(topk_perf.keys()):
-            perfs = topk_perf[topk_val]
-            avg_rel = np.mean([r['relative_performance'] for r in results if r['topk'] == topk_val])
-            avg_sparsity = np.mean([r['sparsity'] for r in results if r['topk'] == topk_val])
-            print(f"  topk={topk_val:2d}: {max(perfs):8.2f} TFLOPS (max), {np.mean(perfs):8.2f} TFLOPS (avg), "
-                  f"{avg_rel:.1f}% of peak (avg), {avg_sparsity:.1%} sparsity (avg)")
+        # Performance by causal vs non-causal
+        print("\nPerformance by attention mode:")
+        causal_perf = [r['tflops'] for r in results if r['causal']]
+        non_causal_perf = [r['tflops'] for r in results if not r['causal']]
+        if causal_perf:
+            avg_rel_causal = np.mean([r['relative_performance'] for r in results if r['causal']])
+            print(f"  Causal:     {max(causal_perf):8.2f} TFLOPS (max), {np.mean(causal_perf):8.2f} TFLOPS (avg), "
+                  f"{avg_rel_causal:.1f}% of peak (avg)")
+        if non_causal_perf:
+            avg_rel_non_causal = np.mean([r['relative_performance'] for r in results if not r['causal']])
+            print(f"  Non-causal: {max(non_causal_perf):8.2f} TFLOPS (max), {np.mean(non_causal_perf):8.2f} TFLOPS (avg), "
+                  f"{avg_rel_non_causal:.1f}% of peak (avg)")
         
         # FastWan-specific performance summary
         fastwan_results = [r for r in results if r['heads'] == 40 and r['head_dim'] == 128]
@@ -727,8 +625,7 @@ def main():
                       f"({fastwan_results[0]['relative_performance']:.1f}% of peak)")
                 print(f"  - Config: batch={fastwan_results[0]['batch']}, heads={fastwan_results[0]['heads']}, "
                       f"seq_len={fastwan_results[0]['seq_len']}, head_dim={fastwan_results[0]['head_dim']}, "
-                      f"topk={fastwan_results[0]['topk']}")
-                print(f"  - Sparsity: {fastwan_results[0]['sparsity']:.1%}")
+                      f"causal={fastwan_results[0]['causal']}")
                 
                 # FastWan performance by sequence length
                 print("\nFastWan performance by sequence length:")
@@ -744,45 +641,29 @@ def main():
                     avg_rel = np.mean([r['relative_performance'] for r in fastwan_results if r['seq_len'] == seq_len])
                     print(f"  {seq_len:6d}: {max(perfs):8.2f} TFLOPS (max), {np.mean(perfs):8.2f} TFLOPS (avg), "
                           f"{avg_rel:.1f}% of peak (avg)")
-                
-                # FastWan performance by topk
-                print("\nFastWan performance by topk value:")
-                fastwan_topk_perf = {}
-                for r in fastwan_results:
-                    topk_val = r['topk']
-                    if topk_val not in fastwan_topk_perf:
-                        fastwan_topk_perf[topk_val] = []
-                    fastwan_topk_perf[topk_val].append(r['tflops'])
-                
-                for topk_val in sorted(fastwan_topk_perf.keys()):
-                    perfs = fastwan_topk_perf[topk_val]
-                    avg_rel = np.mean([r['relative_performance'] for r in fastwan_results if r['topk'] == topk_val])
-                    avg_sparsity = np.mean([r['sparsity'] for r in fastwan_results if r['topk'] == topk_val])
-                    print(f"  topk={topk_val:2d}: {max(perfs):8.2f} TFLOPS (max), {np.mean(perfs):8.2f} TFLOPS (avg), "
-                          f"{avg_rel:.1f}% of peak (avg), {avg_sparsity:.1%} sparsity (avg)")
         
         # Top 10 configurations
         print("\nTop 10 performing configurations:")
-        print(f"{'Rank':<5} {'Batch':<6} {'Heads':<6} {'SeqLen':<7} {'HeadDim':<8} {'TopK':<6} {'Sparsity':<9} {'TFLOPS':<10} {'% Peak':<8}")
-        print("-" * 80)
+        print(f"{'Rank':<5} {'Batch':<6} {'Heads':<6} {'SeqLen':<7} {'HeadDim':<8} {'Causal':<7} {'TFLOPS':<10} {'% Peak':<8}")
+        print("-" * 70)
         for i, r in enumerate(results[:10]):
             print(f"{i+1:<5} {r['batch']:<6} {r['heads']:<6} {r['seq_len']:<7} {r['head_dim']:<8} "
-                  f"{r['topk']:<6} {r['sparsity']:<9.1%} {r['tflops']:<10.2f} {r['relative_performance']:<8.1f}")
+                  f"{str(r['causal']):<7} {r['tflops']:<10.2f} {r['relative_performance']:<8.1f}")
         
         # GPU-specific insights
         print(f"\nGPU-Specific Performance Insights:")
         if gpu_type == "mi300x":
             print("  ✅ MI300X: Massive memory capacity (192GB) enables testing of ultra-long sequences")
-            print("  ✅ Optimal for: Ultra-long video sequences, massive models, high-throughput processing")
+            print("  ✅ Optimal for: Ultra-long sequences, massive models, high-throughput processing")
         elif gpu_type == "mi250":
             print("  ✅ MI250: Large memory capacity enables testing of very long sequences")
-            print("  ✅ Optimal for: Long video sequences, high-throughput processing, large models")
+            print("  ✅ Optimal for: Long sequences, high-throughput processing, large models")
         elif gpu_type == "mi210":
-            print("  ✅ MI210: Limited shared memory (64KB) requires very conservative configurations")
-            print("  ✅ Optimal for: Short to medium video sequences, memory-constrained applications")
+            print("  ✅ MI210: Balanced memory capacity for medium-scale workloads")
+            print("  ✅ Optimal for: Medium sequences, efficient resource usage")
         elif gpu_type == "w7800":
             print("  ✅ W7800: Conservative memory usage optimized for professional workloads")
-            print("  ✅ Optimal for: Standard video processing, moderate sequence lengths")
+            print("  ✅ Optimal for: Standard workloads, moderate sequence lengths")
         else:
             print("  ✅ Generic ROCm: Balanced configurations for various ROCm-compatible GPUs")
     

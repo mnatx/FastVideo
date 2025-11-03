@@ -4,25 +4,31 @@ from fastvideo.fastvideo_args import FastVideoArgs
 
 def main():
 
+    # export FASTVIDEO_ATTENTION_BACKEND=VIDEO_SPARSE_ATTN
+    # export FASTVIDEO_ATTENTION_BACKEND=TORCH_SDPA
+    # export FASTVIDEO_ATTENTION_BACKEND=FLASH_ATTN
+
     if "FASTVIDEO_ATTENTION_BACKEND" not in os.environ:
-        os.environ["FASTVIDEO_ATTENTION_BACKEND"] = "VIDEO_SPARSE_ATTN"
+        os.environ["FASTVIDEO_ATTENTION_BACKEND"] = "TORCH_SDPA"
 
     SAVE_VIDEO=False
     OUTPUT_PATH="my_videos/"
 
-    # resolution=(256,256)        # tiny
-    resolution=(640,480)        # 480p
+    resolution=(256,256)        # tiny
+    # resolution=(640,480)        # 480p
     # resolution=(1280,720)       # 720p
     # resolution=(1920,1080)      # 1080p
     WIDTH=resolution[0]
     HEIGHT=resolution[1]
-    # NUM_FRAMES=125                # default
-    NUM_FRAMES=250
+    NUM_FRAMES=125                # default
+    # NUM_FRAMES=250
 
     print('')
     print('FASTVIDEO_ATTENTION_BACKEND:', os.environ["FASTVIDEO_ATTENTION_BACKEND"])
     print('SAVE_VIDEO:', SAVE_VIDEO)
     print('resolution:', resolution)
+    print('frames:', NUM_FRAMES)
+    print('')
 
     # Create a video generator with a pre-trained model
     generator = VideoGenerator.from_pretrained(
