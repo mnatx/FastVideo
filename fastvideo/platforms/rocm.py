@@ -116,7 +116,12 @@ class RocmPlatform(Platform):
             logger.info("Using Torch SDPA backend.")
             return "fastvideo.attention.backends.sdpa.SDPABackend"
 
-        # Try Video Sparse Attention as a fallback for ROCm
+        # If FLASH_ATTN was explicitly selected and is available, use it
+        if selected_backend == AttentionBackendEnum.FLASH_ATTN:
+            logger.info("Using Flash Attention backend.")
+            return "fastvideo.attention.backends.flash_attn.FlashAttentionBackend"
+
+        # Try Video Sparse Attention as a fallback for ROCm (only if no backend was explicitly selected)
         try:
             from fastvideo.attention.backends.video_sparse_attn import (  # noqa: F401
                 VideoSparseAttentionBackend)
