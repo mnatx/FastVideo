@@ -43,6 +43,8 @@ This directory contains project-specific rules and guidelines for the FastVideo 
 - Follow the registry pattern for dynamic component loading
 - Use abstract base classes for extensibility
 - Maintain clear separation of concerns
+- Use **pipeline stages** for modular pipeline components
+- Implement **stage verification** for robust error handling
 
 ## Quick Reference
 
@@ -71,6 +73,51 @@ def generate_video(self, prompt: str, **kwargs) -> Dict[str, Any]:
 def sample_batch():
     return ForwardBatch(prompt="test", height=256, width=256)
 ```
+
+### Pipeline Stage Verification
+```python
+from fastvideo.pipelines.stages.validators import StageValidators as V, VerificationResult
+
+def verify_input(self, batch, fastvideo_args):
+    result = VerificationResult()
+    result.add_check("height", batch.height, V.positive_int_divisible(8))
+    result.add_check("width", batch.width, V.positive_int_divisible(8))
+    return result
+```
+
+### Image Processing
+```python
+from fastvideo.image_processor import ImageProcessor
+
+image_processor = ImageProcessor(vae_scale_factor=8)
+processed_tensor = image_processor.preprocess(image, height=256, width=256)
+```
+
+### Rotary Embeddings
+```python
+from fastvideo.layers.rotary_embedding import get_nd_rotary_pos_embed
+
+cos, sin = get_nd_rotary_pos_embed(
+    rope_dim_list=[64, 64, 64],
+    rope_sizes=(16, 32, 32),
+    theta=10000.0,
+    shard_dim=0,
+    sp_rank=sp_rank,
+    sp_world_size=sp_world_size
+)
+```
+
+## Recent Updates (Commit 188e872)
+
+This ruleset has been updated to include patterns from commit 188e87242ebc6abed189e421ecf8f7a834cc499d, which includes:
+
+- **Pipeline Stage Architecture**: New modular stage-based pipeline system with verification
+- **Image Processing**: New lightweight `ImageProcessor` class for preprocessing
+- **Rotary Embeddings**: New rotary embedding utilities with sequence parallelism support
+- **Visual Embeddings**: New visual embedding patterns for timestep conditioning
+- **Cosmos Pipeline**: Support for Cosmos video diffusion pipeline
+- **Attention Backends**: Reorganized attention backend structure
+- **Documentation**: Migration from Sphinx to MkDocs
 
 ## Usage
 

@@ -5,6 +5,8 @@
 - Use **Google-style docstrings** with clear sections
 - Include **type information** in docstrings
 - Document **side effects** and **resource usage**
+- Include **SPDX license identifiers** at the top of files (`# SPDX-License-Identifier: Apache-2.0`)
+- Add **adapter notes** when code is adapted from other projects (e.g., "Adapted from vllm", "Adapted from transformers")
 
 ## Docstring Format
 ```python
@@ -59,6 +61,15 @@ def generate_video(self, prompt: str, **kwargs) -> Dict[str, Any]:
 - Show **best practices** and **common patterns**
 - Demonstrate **error handling** and **recovery procedures**
 
+## Documentation System
+- Use **MkDocs** for project documentation (replaces Sphinx)
+- Configuration file: `mkdocs.yml` in project root
+- Documentation source files in `docs/` directory (not `docs/source/`)
+- Use **Markdown** format for documentation files (`.md`)
+- API documentation generated via `docs/api/` directory
+- Custom assets (CSS, JS, images) in `docs/assets/` directory
+- Run `mkdocs serve` for local preview or `mkdocs build` for production
+
 ## README Standards
 - Include **quick start** instructions
 - Provide **installation** and **setup** guides
@@ -70,6 +81,8 @@ def generate_video(self, prompt: str, **kwargs) -> Dict[str, Any]:
 - Explain **non-obvious** implementation details
 - Document **algorithm choices** and **optimizations**
 - Include **TODO comments** for future improvements
+- Document **sequence parallelism** parameters when applicable
+- Explain **rotary embedding** parameter choices (e.g., `use_real_unbind_dim`)
 
 ## Example Patterns
 ```python
