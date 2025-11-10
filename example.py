@@ -1,6 +1,7 @@
 import os
 from fastvideo import VideoGenerator
 from fastvideo.fastvideo_args import FastVideoArgs
+from fastvideo.configs.sample.teacache import WanTeaCacheParams
 
 def main():
 
@@ -14,20 +15,31 @@ def main():
     SAVE_VIDEO=False
     OUTPUT_PATH="my_videos/"
 
-    resolution=(256,256)        # tiny
-    # resolution=(640,480)        # 480p
+    # resolution=(256,256)        # tiny
+    resolution=(640,480)          # 480p
     # resolution=(1280,720)       # 720p
-    # resolution=(1920,1080)      # 1080p
     WIDTH=resolution[0]
     HEIGHT=resolution[1]
-    NUM_FRAMES=125                # default
+
     # NUM_FRAMES=250
+    NUM_FRAMES=125               # default
+
+    # NUM_STEPS=50               # default
+    NUM_STEPS=4                  # distilled
+
+    # TeaCache settings
+    # USE_TEACACHE=False         # default?
+    USE_TEACACHE=True
+    TEACACHE_THRESHOLD=0.08
+    new_teacache_params = WanTeaCacheParams(teacache_thresh=TEACACHE_THRESHOLD)
 
     print('')
     print('FASTVIDEO_ATTENTION_BACKEND:', os.environ["FASTVIDEO_ATTENTION_BACKEND"])
     print('SAVE_VIDEO:', SAVE_VIDEO)
     print('resolution:', resolution)
     print('frames:', NUM_FRAMES)
+    # print('steps:', NUM_STEPS)
+    print('TeaCache:', USE_TEACACHE, TEACACHE_THRESHOLD)
     print('')
 
     # Create a video generator with a pre-trained model
@@ -44,11 +56,14 @@ def main():
     # Generate the video
     video = generator.generate_video(
         prompt,
-        output_path=OUTPUT_PATH,  # Controls where videos are saved
+        output_path=OUTPUT_PATH,
         height=HEIGHT, width=WIDTH,
         num_frames=NUM_FRAMES,
+        # num_inference_steps=NUM_STEPS,
         save_video=SAVE_VIDEO,
-        output_type="latent"
+        output_type="latent",
+        teacache_params=new_teacache_params,
+        enable_teacache=USE_TEACACHE
     )
 
     # Generate another video with a different prompt, without reloading the model!
@@ -64,8 +79,11 @@ def main():
         output_path=OUTPUT_PATH,
         height=HEIGHT, width=WIDTH,
         num_frames=NUM_FRAMES,
+        # num_inference_steps=NUM_STEPS,
         save_video=SAVE_VIDEO,
-        output_type="latent"
+        output_type="latent",
+        teacache_params=new_teacache_params,
+        enable_teacache=USE_TEACACHE
     )
 
 if __name__ == '__main__':
