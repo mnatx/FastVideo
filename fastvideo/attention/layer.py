@@ -173,9 +173,13 @@ class DistributedAttention_VSA(DistributedAttention):
         forward_context: ForwardContext = get_forward_context()
         ctx_attn_metadata = forward_context.attn_metadata
 
-        # Stack QKV
-        qkvg = torch.cat([q, k, v, gate_compress],
-                         dim=0)  # [3, seq_len, num_heads, head_dim]
+        # Stack QKV (and gate_compress if provided)
+        if gate_compress is not None:
+            qkvg = torch.cat([q, k, v, gate_compress],
+                             dim=0)  # [4, seq_len, num_heads, head_dim]
+        else:
+            qkvg = torch.cat([q, k, v],
+                             dim=0)  # [3, seq_len, num_heads, head_dim]
 
         # Redistribute heads across sequence dimension
         qkvg = sequence_model_parallel_all_to_all_4D(qkvg,
@@ -184,9 +188,24 @@ class DistributedAttention_VSA(DistributedAttention):
 
         qkvg = self.attn_impl.preprocess_qkv(qkvg, ctx_attn_metadata)
 
-        q, k, v, gate_compress = qkvg.chunk(4, dim=0)
+        if gate_compress is not None:
+            q, k, v, gate_compress = qkvg.chunk(4, dim=0)
+        else:
+            q, k, v = qkvg.chunk(3, dim=0)
+            gate_compress = None
+        
+        # Validate that q, k, v have consistent shapes after preprocessing and splitting
+        # This helps catch tiling issues early
+        if q.shape != k.shape or q.shape != v.shape:
+            raise RuntimeError(
+                f"Shape mismatch after preprocess_qkv and splitting: "
+                f"q.shape={q.shape}, k.shape={k.shape}, v.shape={v.shape}. "
+                f"This indicates an issue with the tiling/preprocessing logic. "
+                f"qkvg.shape before chunk={qkvg.shape}"
+            )
+        
         output = self.attn_impl.forward(
-            q, k, v, gate_compress, ctx_attn_metadata)  # type: ignore[call-arg]
+            q, k, v, ctx_attn_metadata, gate_compress=gate_compress)  # type: ignore[call-arg]
 
         # Redistribute back if using sequence parallelism
         replicated_output = None

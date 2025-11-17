@@ -1,16 +1,15 @@
 import os
+# export FASTVIDEO_ATTENTION_BACKEND=VIDEO_SPARSE_ATTN
+# export FASTVIDEO_ATTENTION_BACKEND=TORCH_SDPA
+# export FASTVIDEO_ATTENTION_BACKEND=FLASH_ATTN
+if "FASTVIDEO_ATTENTION_BACKEND" not in os.environ:
+    os.environ["FASTVIDEO_ATTENTION_BACKEND"] = "TORCH_SDPA"
+
 from fastvideo import VideoGenerator
 from fastvideo.fastvideo_args import FastVideoArgs
 from fastvideo.configs.sample.teacache import WanTeaCacheParams
 
 def main():
-
-    # export FASTVIDEO_ATTENTION_BACKEND=VIDEO_SPARSE_ATTN
-    # export FASTVIDEO_ATTENTION_BACKEND=TORCH_SDPA
-    # export FASTVIDEO_ATTENTION_BACKEND=FLASH_ATTN
-
-    if "FASTVIDEO_ATTENTION_BACKEND" not in os.environ:
-        os.environ["FASTVIDEO_ATTENTION_BACKEND"] = "TORCH_SDPA"
 
     SAVE_VIDEO=False
     OUTPUT_PATH="my_videos/"
@@ -28,8 +27,7 @@ def main():
     NUM_STEPS=4                  # distilled
 
     # TeaCache settings
-    # USE_TEACACHE=False         # default?
-    USE_TEACACHE=True
+    USE_TEACACHE=False
     TEACACHE_THRESHOLD=0.08
     new_teacache_params = WanTeaCacheParams(teacache_thresh=TEACACHE_THRESHOLD)
 
@@ -40,12 +38,14 @@ def main():
     print('frames:', NUM_FRAMES)
     # print('steps:', NUM_STEPS)
     print('TeaCache:', USE_TEACACHE, TEACACHE_THRESHOLD)
+    print('Sequence Parallelism (sp_size): 1 (disabled)')
     print('')
 
     # Create a video generator with a pre-trained model
     generator = VideoGenerator.from_pretrained(
         "FastVideo/FastWan2.1-T2V-1.3B-Diffusers",
         num_gpus=1,  # Adjust based on your hardware
+        sp_size=1,  # Disable sequence parallelism (set to 1)
         use_fsdp_inference=False,  # Disable FSDP inference
         VSA_sparsity=0.90,
     )
